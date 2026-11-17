@@ -1,6 +1,8 @@
 -- SPECTRA remote loader (version-independent)
 -- Runs the latest SPECTRA source from the spectra-loader GitHub branch.
 local RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
+-- Force a distinct URL for each load to avoid stale raw-file caches.
+local SOURCE_URL = RAW_URL .. "?v=" .. tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
 
 if type(loadstring) ~= "function" then
     warn("[SPECTRA] loadstring is unavailable in this environment.")
@@ -8,7 +10,7 @@ if type(loadstring) ~= "function" then
 end
 
 local fetched, source = pcall(function()
-    return game:HttpGet(RAW_URL)
+    return game:HttpGet(SOURCE_URL)
 end)
 if not fetched or type(source) ~= "string" or #source == 0 then
     warn("[SPECTRA] Could not fetch Lua source: " .. tostring(source))
