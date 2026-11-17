@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.10.2
+    SPECTRA / PHASE 1                         v1.10.3
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.10.2"
+local VERSION = "1.10.3"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1986,7 +1986,8 @@ local Compat=(function()
     local compat={
         text="No snapshot yet",lastTime="never",view=nil,
         previousSubject=nil,previousRoot=nil,previousPosition=nil,
-        previousCameraPosition=nil,previousClock=nil
+        previousCameraPosition=nil,previousClock=nil,
+        observation=nil,lastObservation="Not run",lastEmit=""
     }
     local function readable(fn,fallback)
         local ok,value=pcall(fn)
@@ -2006,6 +2007,103 @@ local Compat=(function()
         if humanoid then return "EXPOSED: local model and Humanoid (server effect unverified)" end
         return "PARTIAL: owned custom rig; no Humanoid exposed (server effect unverified)"
     end
+
+    -- Short, opt-in, read-only capture. Measures public local input and
+    -- replicated subject/camera movement, never writes character state.
+    -- Correlation is useful for troubleshooting but is NOT ownership proof.
+    local function observationKeyDown()
+        if readable(function() return UserInputService:GetFocusedTextBox()~=nil end,false) then
+            return false
+        end
+        for _,key in ipairs({Enum.KeyCode.W,Enum.KeyCode.A,Enum.KeyCode.S,Enum.KeyCode.D}) do
+            if readable(function() return UserInputService:IsKeyDown(key) end,false) then return true end
+        end
+        return false
+    end
+    local function startObservation()
+        if compat.observation then
+            log("INFO","A 10-second compatibility capture is already running")
+            return
+        end
+        compat.observation={
+            elapsed=0,accumulated=0,secondsWithInput=0,samples=0,
+            samplesWithInput=0,samplesWithMotion=0,
+            motionAndInput=0,changedSubject=0,
+            rootPath=0,cameraPath=0,humanoidMoveSamples=0,
+            previousRoot=nil,previousCamera=nil,subject=nil,
+            previousSubject=nil
+        }
+        compat.lastObservation="Observing local keyboard input and camera-followed model for up to 10 seconds..."
+        log("INFO","Read-only 10-second observation started. Close menu and walk with WASD; no gameplay changes made.")
+    end
+    local function sampleObservation(dt)
+        local c=compat.observation
+        if not c then return end
+        if type(dt)~="number" or dt<=0 then return end
+        c.elapsed+=math.min(dt,0.5)
+        c.accumulated+=math.min(dt,0.5)
+        if c.accumulated>=0.15 then
+            local elapsed=c.accumulated
+            c.accumulated=0
+            c.samples+=1
+            local camera=Workspace.CurrentCamera
+            local subject=camera and camera.CameraSubject
+            local model=subject and readable(function()
+                return subject:IsA("Model") and subject or subject:FindFirstAncestorWhichIsA("Model")
+            end,nil)
+            local root=model and readable(function() return getRoot(model) end,nil) or nil
+            local rootPosition=root and readable(function() return root.Position end,nil) or nil
+            local cameraPosition=camera and readable(function() return camera.CFrame.Position end,nil) or nil
+            local inputDown=observationKeyDown()
+            if inputDown then
+                c.samplesWithInput+=1
+                c.secondsWithInput+=elapsed
+            end
+            if subject and readable(function() return subject:IsA("Humanoid") end,false) then
+                local hasMove=readable(function() return subject.MoveDirection.Magnitude>0.1 end,false)
+                if hasMove then c.humanoidMoveSamples+=1 end
+            end
+            if c.previousSubject and subject~=c.previousSubject then
+                c.changedSubject+=1
+                c.previousRoot=nil
+                c.previousCamera=nil
+            end
+            if c.previousRoot and rootPosition then
+                local dist=(rootPosition-c.previousRoot).Magnitude
+                local camDist=c.previousCamera and cameraPosition
+                    and (cameraPosition-c.previousCamera).Magnitude or 0
+                c.rootPath+=dist
+                c.cameraPath+=camDist
+                if dist>0.05 then
+                    c.samplesWithMotion+=1
+                    if inputDown then c.motionAndInput+=1 end
+                end
+            end
+            c.previousRoot=rootPosition
+            c.previousCamera=cameraPosition
+            c.previousSubject=subject
+        end
+        if c.elapsed>=10 then
+            compat.observation=nil
+            local status
+            if c.samplesWithInput<2 then
+                status="INCONCLUSIVE: little/no WASD input recorded (menu may have remained open)"
+            elseif c.samplesWithMotion<2 then
+                status="INCONCLUSIVE: subject root did not visibly move during sampling"
+            elseif c.motionAndInput>=2 then
+                status="CORRELATED: camera subject movement coincides with local WASD input (ownership still UNVERIFIED)"
+            else
+                status="UNCONFIRMED: subject motion and local WASD input did not sufficiently overlap"
+            end
+            compat.lastObservation=string.format(
+                "10 s observation: %s\n%d samples; WASD held ~%.1f s; moving samples %d; movement+WASD samples %d; Humanoid MoveDirection samples %d; subject changes %d\nTotal root travel: %.1f studs; camera travel: %.1f studs. Spectating cannot be excluded.",
+                status,c.samples,c.secondsWithInput,c.samplesWithMotion,c.motionAndInput,
+                c.humanoidMoveSamples,c.changedSubject,c.rootPath,c.cameraPath)
+            print("[SPECTRA COMPAT MOTION] "..compat.lastObservation:gsub("\n"," | "))
+            log("INFO","Read-only movement observation completed; run compat to view result")
+        end
+    end
+
     local function snapshot()
         local rows={}
         local function line(text)
@@ -2189,6 +2287,10 @@ local Compat=(function()
         local status=category(candidate,root,hum)
         line("Movement API: "..status)
         line("")
+        line("[OPT-IN MOVEMENT OBSERVATION]")
+        line(compat.lastObservation)
+        line("An input/motion correlation does not establish identity or server-controlled abilities.")
+        line("")
         line("[CAMERA & INPUT]")
         line("CurrentCamera exists: "..bool(camera~=nil))
         if camera then
@@ -2247,6 +2349,8 @@ local Compat=(function()
         log("WARN","Clipboard unavailable; compatibility report printed to Roblox console")
     end
     compat.snapshot=snapshot
+    compat.startObservation=startObservation
+    compat.sampleObservation=sampleObservation
     compat.emit=emit
     compat.copy=copy
     return compat
@@ -2573,7 +2677,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.2",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.3",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2860,6 +2964,7 @@ local function launchSpectraUI()
         Compat.emit()
         log("INFO","Compatibility snapshot printed with [SPECTRA COMPAT] prefix")
     end)
+    action(compatPage,"Start 10s WASD + camera motion observation",Compat.startObservation)
     action(compatPage,"Copy compatibility report",Compat.copy)
     row(compatPage,"How to use","Press Refresh after spawning or toggling a modifier")
     local compatReportView=create("TextBox",{
@@ -2962,7 +3067,7 @@ local function launchSpectraUI()
     round(run,5)
     local function runCommand(raw)
         local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-        if input=="help" then log("INFO","Commands: help, status, compat, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
         elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
             log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
         elseif input=="compat" then
@@ -2970,6 +3075,8 @@ local function launchSpectraUI()
                 Compat.emit()
                 log("INFO","Read-only compatibility report printed to Roblox logs")
             end)
+        elseif input=="compatmove" then
+            safeCall("Read-only input and motion observation",Compat.startObservation)
         elseif input=="copycompat" then
             safeCall("Copy compatibility",Compat.copy)
         elseif input=="inputdiag" then
@@ -3131,6 +3238,11 @@ local function launchSpectraUI()
     end)
     connect(UserInputService.JumpRequest,Movement.jumpRequested)
     connect(RunService.Heartbeat,function(dt)
+        local observeOK,observeError=pcall(Compat.sampleObservation,dt)
+        if not observeOK then
+            log("ERROR","Read-only motion observation failed: "..tostring(observeError))
+            Compat.observation=nil
+        end
         local ok,err=pcall(Movement.update,dt)
         if not ok then
             Movement.data.errors+=1
@@ -3187,7 +3299,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.10.2 loaded. CameraSubject motion correlation and native owner lookup | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.10.3 loaded. Opt-in read-only input and camera-subject correlation | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
