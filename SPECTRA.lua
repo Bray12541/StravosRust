@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.6.1
+    SPECTRA / PHASE 1                         v1.6.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.6.1"
+local VERSION = "1.6.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -71,7 +71,6 @@ local COLOR_MODES = {
 }
 local state = {
     enabled = true,
-    boxes = true,
     distances = true,
     tracers = false,
     skeleton = false,
@@ -299,8 +298,7 @@ local function newWidget(key)
     local w = {root = create("Frame", {
         Name="Marker", BackgroundTransparency=1, BorderSizePixel=0,
         Position=UDim2.fromOffset(0,0), Size=UDim2.fromScale(1,1), ZIndex=10
-    }, overlayLayer), edges={}, skeleton={}}
-    for i=1,4 do w.edges[i] = makeLine(w.root) end
+    }, overlayLayer), skeleton={}}
     w.tracer = makeLine(w.root)
     for i=1,MAX_SKELETON_LINES do w.skeleton[i] = makeLine(w.root) end
     w.distance = textLabel(w.root, "", 11, C.white)
@@ -983,14 +981,6 @@ local function render()
             local clr = markerColor()
             done += 1
             w.root.Visible = true
-            local edges = w.edges
-            for i=1,4 do edges[i].Visible = state.boxes end
-            if state.boxes then
-                put(edges[1],left,top,right,top,clr,1)
-                put(edges[2],right,top,right,bottom,clr,1)
-                put(edges[3],right,bottom,left,bottom,clr,1)
-                put(edges[4],left,bottom,left,top,clr,1)
-            end
             w.distance.Visible = state.distances
             if state.distances then
                 w.distance.Text = string.format("%d studs", math.floor(distance+0.5))
@@ -1109,7 +1099,7 @@ local function report()
         "FPS: "..string.format("%.0f",stats.fps).." / render target: 50 Hz (limited by FPS)",
         "Connections tracked: "..tostring(#connections),
         "Scans: "..tostring(stats.scans),
-        "Options: boxes="..tostring(state.boxes).." skeleton="..tostring(state.skeleton).." highlights="..tostring(state.highlights),
+        "Options: skeleton="..tostring(state.skeleton).." highlights="..tostring(state.highlights),
         "Enemy-only tracking: "..tostring(stats.teammates).." allies excluded; unknown teams: "..tostring(stats.unknownTeams),
         "Group-matched enemy rigs: "..tostring(stats.enemyGroups).." (only when Roblox Team names match)",
         "Calibration: "..calibrationMessage,
@@ -1174,7 +1164,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.6.1",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.6.2",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1279,9 +1269,8 @@ local espPage=pages.ESP
 header(espPage,"Player visuals","Configure your in-game overlay")
 groupLabel(espPage,"DISPLAY")
 toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
-toggle(espPage,"2D boxes","Screen-space rectangles around detected characters","boxes")
 toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
-toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
+toggle(espPage,"Tracers","Lines from the screen bottom toward players","tracers")
 toggle(espPage,"Skeleton","Real rig joints where found; estimated shape otherwise","skeleton")
 toggle(espPage,"3D highlight","Client-side character highlighting","highlights")
 
@@ -1471,7 +1460,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.6.1 loaded. Simplified menu | Automatic 1v1 detection | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.6.2 loaded. 2D boxes removed | F8: debug | Ctrl+End: unload")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
