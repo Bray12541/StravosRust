@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.10.0
+    SPECTRA / PHASE 1                         v1.10.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.10.0"
+local VERSION = "1.10.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -2019,20 +2019,62 @@ local Compat=(function()
         local subject=camera and readable(function() return camera.CameraSubject end,nil) or nil
         local subjectType=subject and readable(function() return subject.ClassName end,"unknown") or "nil"
         line("CameraSubject class: "..subjectType)
+        local subjectModel=nil
+        local subjectOwner=nil
+        if subject then
+            line("CameraSubject name: "..tostring(readable(function() return subject.Name end,"unknown")))
+            local fullPath=readable(function() return subject:GetFullName() end,"unavailable")
+            line("CameraSubject path: "..tostring(fullPath):sub(1,180))
+            -- Walk only the publicly replicated instance ancestry. A camera
+            -- subject is NOT proof that its model belongs to LocalPlayer:
+            -- spectator cameras may target another character.
+            local node=subject
+            local ancestry={}
+            for i=1,6 do
+                node=readable(function() return node.Parent end,nil)
+                if not node then break end
+                local nodeClass=readable(function() return node.ClassName end,"unknown")
+                local nodeName=readable(function() return node.Name end,"unknown")
+                ancestry[#ancestry+1]=nodeClass.."/"..tostring(nodeName):sub(1,45)
+                if not subjectModel and readable(function() return node:IsA("Model") end,false) then
+                    subjectModel=node
+                end
+            end
+            line("CameraSubject ancestors: "..(#ancestry>0 and table.concat(ancestry," > ") or "none"))
+            if subjectModel then
+                subjectOwner=readable(function() return identifyPlayer(subjectModel) end,nil)
+                local ownership="UNVERIFIED (camera subject alone is insufficient)"
+                if subjectOwner==LocalPlayer then ownership="VERIFIED LOCAL PLAYER"
+                elseif subjectOwner then ownership="another identified player" end
+                line("CameraSubject model: "..tostring(subjectModel.Name):sub(1,60))
+                line("CameraSubject model ownership: "..ownership)
+                local subjectRoot=readable(function() return getRoot(subjectModel) end,nil)
+                line("CameraSubject model root: "..(subjectRoot and subjectRoot.Name or "none"))
+                if subjectRoot then
+                    line("CameraSubject root anchored: "..bool(readable(function() return subjectRoot.Anchored end,false)))
+                end
+                local subjectChildren=readable(function() return subjectModel:GetChildren() end,{})
+                local parts,humanoids,other=0,0,0
+                for i=1,math.min(#subjectChildren,120) do
+                    local child=subjectChildren[i]
+                    if child:IsA("BasePart") then parts+=1
+                    elseif child:IsA("Humanoid") then humanoids+=1
+                    else other+=1 end
+                end
+                line(string.format("CameraSubject model immediate children (max 120): parts=%d humanoids=%d other=%d",parts,humanoids,other))
+            else
+                line("CameraSubject model: no Model ancestor exposed")
+            end
+        end
         local candidate=nil
         local candidateSource="none"
         if direct and direct:IsA("Model") then
             candidate=direct
             candidateSource="LocalPlayer.Character"
         end
-        if not candidate and subject then
-            local ancestor=readable(function()
-                return subject:IsA("Model") and subject or subject:FindFirstAncestorWhichIsA("Model")
-            end,nil)
-            if ancestor and readable(function() return identifyPlayer(ancestor)==LocalPlayer end,false) then
-                candidate=ancestor
-                candidateSource="verified CameraSubject ancestor"
-            end
+        if not candidate and subjectModel and subjectOwner==LocalPlayer then
+            candidate=subjectModel
+            candidateSource="verified CameraSubject ancestor"
         end
 
         -- Bounded read of replicated models, avoiding scanning the entire
@@ -2486,7 +2528,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3100,7 +3142,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.10.0 loaded. Read-only compatibility inspector | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.10.1 loaded. CameraSubject ancestry and owner verification | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
