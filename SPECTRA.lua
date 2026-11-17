@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.2
+    SPECTRA / PHASE 1                         v1.7.3
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.2"
+local VERSION = "1.7.3"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1038,6 +1038,11 @@ local aimLastAngularError = 0
 local aimLastWrittenCamera = nil
 local aimCameraResetEvents = 0
 local aimLastTargetModel = nil
+local aimLastWriteDegrees = 0
+local aimLastResetDegrees = 0
+local aimOverrideStreak = 0
+local aimOverrideSamples = 0
+local aimLastRetained = false
 
 local function angleBetween(a,b)
     return math.deg(math.acos(math.clamp(a:Dot(b),-1,1)))
@@ -1195,20 +1200,41 @@ local function runAimbot(dt)
         aimLastAngularError=angleBetween(before.LookVector,desiredDir)
         if aimLastWrittenCamera and aimLastTargetModel==target.model then
             local reset=angleBetween(before.LookVector,aimLastWrittenCamera.LookVector)
-            if reset>2.5 then aimCameraResetEvents+=1 end
+            aimLastResetDegrees=reset
+            -- The old 2.5 degree cutoff missed subtle per-frame resets.
+            -- Compare lost rotation against the amount actually written.
+            local wasReversed=aimLastWriteDegrees>0.08
+                and reset>math.max(0.12,aimLastWriteDegrees*0.50)
+            if wasReversed then
+                aimCameraResetEvents+=1
+                aimOverrideStreak+=1
+                aimOverrideSamples+=1
+                aimLastRetained=false
+            else
+                aimOverrideStreak=0
+                aimLastRetained=true
+            end
         end
         local alpha=1-math.exp(-dt*30/math.max(1,state.aimSmoothing))
         local nextCF=before:Lerp(desired,math.clamp(alpha,0,1))
         camera.CFrame=nextCF
         local after=camera.CFrame
         aimLastMoveDegrees=angleBetween(before.LookVector,after.LookVector)
+        aimLastWriteDegrees=aimLastMoveDegrees
         aimMovementSamples+=1
         if aimLastMoveDegrees>0.01 then aimCameraMoved+=1 end
         aimLastWrittenCamera=after
         aimLastTargetModel=target.model
         aimBackend="Camera"
-        aimLastActiveStatus=string.format("Camera move %.2f deg; aim error %.2f deg; resets %d",
-            aimLastMoveDegrees,aimLastAngularError,aimCameraResetEvents)
+        if aimOverrideStreak>=12 then
+            aimLastActiveStatus=string.format(
+                "Game appears to override camera: %.2f deg lost last frame (%d consecutive frames)",
+                aimLastResetDegrees,aimOverrideStreak)
+        else
+            aimLastActiveStatus=string.format(
+                "Camera wrote %.2f deg; aim error %.2f deg; lost last frame %.2f deg",
+                aimLastMoveDegrees,aimLastAngularError,aimLastResetDegrees)
+        end
     end
     aimUpdates+=1
     aimStatus="Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")"
@@ -1322,6 +1348,9 @@ local function report()
         "Aim last active: "..aimLastActiveStatus,
         "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
             .." | suspected overrides: "..aimCameraResetEvents,
+        "Aim last reset delta: "..string.format("%.2f",aimLastResetDegrees)
+            .." deg | override streak: "..aimOverrideStreak
+            .." | override samples: "..aimOverrideSamples,
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
         "Estimated 2D skeletons shown: "..tostring(stats.approxSkeletons).." (not actual bone poses)",
         "No getgc, hooks, remote scripts, or writes to other character models.",
@@ -1388,7 +1417,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.2",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.3",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1694,7 +1723,7 @@ local function runCommand(raw)
         end
     elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
     elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
-    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | lastActive="..aimLastActiveStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | resets="..aimCameraResetEvents)
+    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | lastActive="..aimLastActiveStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrideSamples="..aimOverrideSamples.." | overrideStreak="..aimOverrideStreak.." | lastResetDegrees="..string.format("%.2f",aimLastResetDegrees))
     elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
     elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
     elseif input=="clear" then table.clear(logs);logBox.Text=""
@@ -1790,7 +1819,10 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
 end)
 
 local aimBindOk,aimBindError=pcall(function()
-    RunService:BindToRenderStep(AIM_RENDER_BIND,Enum.RenderPriority.Camera.Value+5,function(dt)
+    -- The game's camera is custom-controlled; apply this optional client-only
+    -- visual aim adjustment late in the render phase rather than just after
+    -- Roblox's default camera priority.
+    RunService:BindToRenderStep(AIM_RENDER_BIND,Enum.RenderPriority.Last.Value-1,function(dt)
         local ok,err=pcall(runAimbot,dt)
         if not ok then
             aimErrors+=1
@@ -1801,7 +1833,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.2 loaded. Auto prioritizes Camera | Aim diagnostic improvements | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.7.3 loaded. Late render camera aim | per-frame reset diagnostics | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
