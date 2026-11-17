@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.9.6
+    SPECTRA / PHASE 1                         v1.9.7
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.9.6"
+local VERSION = "1.9.7"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1579,6 +1579,13 @@ local Movement = (function()
     end
 
     local function restoreMovement()
+        -- Undo visual yaw jitter if it remains active when toggled off,
+        -- the character changes, or SPECTRA is unloaded.
+        if movement.antiOffset~=0 and movement.root and movement.root.Parent then
+            pcall(function()
+                movement.root.CFrame=movement.root.CFrame*CFrame.Angles(0,-movement.antiOffset,0)
+            end)
+        end
         local old=movement.originalHum
         if old and old.h and old.h.Parent then
             pcall(function()
@@ -1864,14 +1871,12 @@ local Movement = (function()
         local newSpacePress=spaceDown and not movement.spaceHeld
         movement.spaceHeld=spaceDown
         if not movementHasModes() then
-            if movement.antiOffset~=0 and movement.root and movement.root.Parent then
-                pcall(function()
-                    movement.root.CFrame=movement.root.CFrame*CFrame.Angles(0,-movement.antiOffset,0)
-                end)
+            if movement.originalHum or next(movement.collisions) or movement.antiOffset~=0 then
+                restoreMovement()
             end
-            if movement.originalHum or next(movement.collisions) then restoreMovement() end
-            movement.antiOffset=0
-            movement.status="Movement modifiers off"
+            local verified=movement.root and movement.root.Parent and movement.model and movement.model.Parent
+            movement.status=verified and "Movement modifiers off; verified local character"
+                or "Unavailable: no verified local character (movement modifiers off)"
             return
         end
         if newSpacePress and (state.infiniteJump or state.highJump) then
@@ -2292,7 +2297,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.6",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.7",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2868,7 +2873,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.9.6 loaded. Modifier fixes and live compatibility indicator | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.9.7 loaded. Modifier cleanup, compatibility status and control fixes | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial movement compatibility",function()
