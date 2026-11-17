@@ -81,6 +81,7 @@ local state = {
     aimSmoothing = 8,
     aimVisibleOnly = false,
     aimHoldRmb = true,
+    aimSticky = true,
     aimPoint = "Head",
     aimMethod = "Auto",
     noRecoil = false,
@@ -1081,6 +1082,8 @@ local aimRmbHeld = false
 local aimStatus = "Disabled"
 local aimSelected = nil
 local aimSelectionCount = 0
+local aimMetrics={targetSwitches=0,mouseWrites=0,mouseErrors=0,
+    lastMouseDX=0,lastMouseDY=0,lastMethod="None"}
 local aimBackend = "None"
 local aimUpdates = 0
 local aimErrors = 0
@@ -1251,13 +1254,20 @@ local function chooseAimTarget(camera)
                         aimTargetProbe.onScreen+=1
                         local delta=Vector2.new(v.X,v.Y)-center
                         local d=delta.Magnitude
-                        if d<=state.aimFovRadius then
+                        local locked=state.aimSticky and aimSelected
+                            and aimSelected.model==model
+                        local allowed=state.aimFovRadius*(locked and 1.10 or 1)
+                        if d<=allowed then
                             aimTargetProbe.insideFov+=1
                             if aimHasLineOfSight(camera,t,point) then
                                 aimTargetProbe.visible+=1
                                 aimSelectionCount+=1
-                                if d<bestScore then
-                                    best,bestPoint,bestDelta,bestScore=t,point,delta,d
+                                -- Prefer the current target slightly to
+                                -- prevent jitter between nearby enemies.
+                                local bonus=locked and math.min(24,state.aimFovRadius*0.15) or 0
+                                local score=d-bonus
+                                if score<bestScore then
+                                    best,bestPoint,bestDelta,bestScore=t,point,delta,score
                                 end
                             end
                         end
@@ -1328,14 +1338,19 @@ local function runAimbot(dt)
         aimSelected=nil
         return
     end
+    if aimSelected and aimSelected.model~=target.model then
+        aimMetrics.targetSwitches+=1
+    end
     aimSelected=target
-    -- Scriptable FPS cameras frequently overwrite generic CFrame writes.
-    -- Auto uses bounded event-driven stabilization on Scriptable cameras.
-    -- Direct Camera and Mouse methods remain available for comparison.
+    -- Prefer relative mouse input on Scriptable cameras when exposed;
+    -- fallback to bounded CFrame stabilization when unavailable.
+    -- Neither backend proves that weapon aim follows the camera.
     local requested=state.aimMethod
     local method=requested=="Auto"
-        and (camera.CameraType==Enum.CameraType.Scriptable and "Stabilized" or "Camera")
+        and (camera.CameraType==Enum.CameraType.Scriptable
+            and (aimMouseMove and "Mouse" or "Stabilized") or "Camera")
         or requested
+    aimMetrics.lastMethod=method
     if method=="Mouse" then
         if not aimMouseMove then
             aimStatus="Mouse aiming unavailable in executor"
@@ -1347,15 +1362,25 @@ local function runAimbot(dt)
         local scale=0.70/math.max(1,state.aimSmoothing)
         local dx=math.clamp(delta.X*scale,-65,65)
         local dy=math.clamp(delta.Y*scale,-65,65)
-        local ok,err=pcall(aimMouseMove,math.floor(dx+0.5),math.floor(dy+0.5))
-        if not ok then
-            aimErrors+=1
-            aimBackend="Mouse error"
-            aimStatus="Mouse move failed: "..tostring(err)
-            return
+        local pixelX=dx>=0 and math.floor(dx+0.5) or math.ceil(dx-0.5)
+        local pixelY=dy>=0 and math.floor(dy+0.5) or math.ceil(dy-0.5)
+        aimMetrics.lastMouseDX=pixelX
+        aimMetrics.lastMouseDY=pixelY
+        if pixelX~=0 or pixelY~=0 then
+            local ok,err=pcall(aimMouseMove,pixelX,pixelY)
+            if not ok then
+                aimErrors+=1
+                aimMetrics.mouseErrors+=1
+                aimBackend="Mouse error"
+                aimStatus="Mouse move failed: "..tostring(err)
+                return
+            end
+            aimMetrics.mouseWrites+=1
         end
-        aimBackend="Mouse (unverified)"
-        aimLastActiveStatus="Mouse movement sent; game response unverified"
+        aimBackend="Mouse relative input (unverified)"
+        aimLastActiveStatus=string.format(
+            "Mouse delta (%d,%d) sent; camera/weapon response unverified",
+            pixelX,pixelY)
     else
         -- Client camera interpolation: works visually only if the game's
         -- camera controller permits it. It does not guarantee bullet aiming.
@@ -3524,7 +3549,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.14.0 loaded. Fly removed; Aimbot target lock and live aim-source diagnostics")
+    log("INFO","SPECTRA Phase 1 v1.14.0 loaded. Air-movement option removed; Aimbot target lock and aim-source diagnostics")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
