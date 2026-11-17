@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.20.0
+    SPECTRA / PHASE 1                         v1.21.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.20.0"
+local VERSION = "1.21.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -81,6 +81,7 @@ local state = {
     aimSmoothing = 8,
     aimStyle = "Snap",
     aimSnapStrength = 100,
+    aimPullStrength = 150,
     aimVisibleOnly = false,
     aimKey = "Always",
     aimSticky = true,
@@ -1528,9 +1529,15 @@ local function runAimbot(dt)
                 correction=Vector2.new(yaw*pixelsPerRadian,-pitch*pixelsPerRadian)
             end
         end
+        -- Mouse-driven pull-back also moves the game-controlled weapon.
+        -- Increase correction for an already acquired target, but taper it
+        -- near the crosshair to avoid visible oscillation. No camera writes.
+        local pull=state.aimLock and (state.aimPullStrength/100) or 1
+        local taper=math.clamp(correction.Magnitude/18,0.45,1)
+        local actualScale=scale*pull*taper
         local cap=snap and 260 or 65
-        local dx=math.clamp(correction.X*scale,-cap,cap)
-        local dy=math.clamp(correction.Y*scale,-cap,cap)
+        local dx=math.clamp(correction.X*actualScale,-cap,cap)
+        local dy=math.clamp(correction.Y*actualScale,-cap,cap)
         local pixelX=dx>=0 and math.floor(dx+0.5) or math.ceil(dx-0.5)
         local pixelY=dy>=0 and math.floor(dy+0.5) or math.ceil(dy-0.5)
         aimMetrics.lastMouseDX=pixelX
@@ -2785,7 +2792,7 @@ local function report()
         "Aimbot: "..tostring(state.aimEnabled).." | "..aimStatus,
         "Aim method: "..state.aimMethod.." | backend: "..aimBackend,
         "Aim FOV: "..state.aimFovRadius.." px | style: "..state.aimStyle
-            .." | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
+            .." | smoothing: "..state.aimSmoothing.." | pull: "..state.aimPullStrength.."% | point: "..state.aimPoint,
         "Aim activation: "..state.aimKey,
         "Persistent target lock: "..tostring(state.aimLock)
             .." | acquisitions: "..aimLockAcquisitions
@@ -2890,7 +2897,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.20.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.21.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3116,6 +3123,7 @@ local function launchSpectraUI()
         log("INFO","Aimbot style: "..state.aimStyle)
     end)
     settingSlider(aimPage,"Snap strength","Fast mouse correction; tune to in-game sensitivity","aimSnapStrength",40,200,10,"%")
+    settingSlider(aimPage,"Lock pull strength","Mouse-input correction toward a locked target (50% subtle, 250% aggressive)","aimPullStrength",50,250,10,"%")
     settingSlider(aimPage,"Smoothness","Only affects Smooth style (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
     toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
     local aimMethodButton
@@ -3131,7 +3139,7 @@ local function launchSpectraUI()
     end)
     row(aimPage,"Lock behavior","First target must be inside FOV. A valid locked enemy stays selected outside FOV; it releases if lost, defeated or filtered.")
     row(aimPage,"Cover behavior","With Visibility Check off, a locked target can remain selected behind geometry. Bullets still obey game collisions.")
-    row(aimPage,"Runtime compatibility","Auto prioritizes relative mouse input so game weapon controls can react. Camera fallback cannot guarantee actual gun or bullet alignment.")
+    row(aimPage,"Runtime compatibility","Auto prefers mouse movement for camera AND weapon; tune Lock pull strength if your gun lags or jitters. Stabilized only adjusts camera.")
     groupLabel(aimPage,"AIMBOT DIAGNOSTICS")
     action(aimPage,"Print Aimbot diagnostics to Roblox logs",function()
         local camera=Workspace.CurrentCamera
@@ -3573,7 +3581,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.20.0 loaded. Input-first automatic tracking and persistent aim lock available")
+    log("INFO","SPECTRA Phase 1 v1.21.0 loaded. Input-first aim tracking with adjustable pull-back strength")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
