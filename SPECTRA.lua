@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.3.1
+    SPECTRA / PHASE 1                         v1.3.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.3.1"
+local VERSION = "1.3.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -571,6 +571,82 @@ local function render()
     stats.rendered = done
 end
 
+-- Bounded source audit, run only when a report is requested.
+-- Does not track or render objects: it exposes why candidate models are excluded.
+local function inspectDataSources()
+    local lines = {"-- REPLICATION / TEAM PROBE --"}
+    local all = Players:GetPlayers()
+    local counts = {enemy=0, ally=0, unknown=0, characters=0}
+    local function teamLabel(team)
+        return team and team.Name or "nil"
+    end
+    local teams = TeamsService:GetTeams()
+    local teamNames = {}
+    for _, team in ipairs(teams) do
+        teamNames[#teamNames+1] = team.Name .. "(" .. team.TeamColor.Name .. ")"
+    end
+    lines[#lines+1] = "Roblox Teams: " .. #teams .. " | " .. (#teamNames > 0 and table.concat(teamNames, ", ") or "(none)")
+    lines[#lines+1] = "Local team: " .. teamLabel(LocalPlayer.Team) .. " | neutral=" .. tostring(LocalPlayer.Neutral)
+    for _, p in ipairs(all) do
+        local relation = getPlayerRelation(p)
+        counts[relation] += 1
+        if p.Character and p.Character.Parent then counts.characters += 1 end
+    end
+    lines[#lines+1] = string.format(
+        "Player relations: enemies=%d allies=%d unknown=%d | standard characters=%d/%d",
+        counts.enemy, counts.ally, counts.unknown, counts.characters, #all
+    )
+    local folder = Workspace:FindFirstChild("Players")
+    if not folder then
+        lines[#lines+1] = "Workspace.Players: MISSING"
+        return lines
+    end
+    local children = folder:GetChildren()
+    lines[#lines+1] = "Workspace.Players: " .. #children .. " direct groups"
+    for groupIndex=1,math.min(10,#children) do
+        local group = children[groupIndex]
+        local queue = {{group,0}}
+        local index, checked, modelCount, validCount, namedCount, enemyCount, allyCount, unknownCount = 1, 0, 0, 0, 0, 0, 0, 0
+        local samples = {}
+        while index <= #queue and checked < 250 do
+            local item = queue[index]
+            index += 1
+            local node, depth = item[1], item[2]
+            for _, child in ipairs(node:GetChildren()) do
+                checked += 1
+                if checked > 250 then break end
+                if child:IsA("Model") then
+                    modelCount += 1
+                    if validCount < 60 then
+                        local valid = validModel(child)
+                        if valid then
+                            validCount += 1
+                            local owner = identifyPlayer(child)
+                            if owner then namedCount += 1 end
+                            local relation = owner and getPlayerRelation(owner) or getGroupRelation(child)
+                            if relation == "enemy" then enemyCount += 1
+                            elseif relation == "ally" then allyCount += 1
+                            else unknownCount += 1 end
+                            if #samples < 3 then
+                                samples[#samples+1] = child.Name .. ":" .. (owner and owner.Name or "?") .. "/" .. relation
+                            end
+                        end
+                    end
+                    if depth < 3 then queue[#queue+1] = {child,depth+1} end
+                elseif child:IsA("Folder") and depth < 3 then
+                    queue[#queue+1] = {child,depth+1}
+                end
+            end
+        end
+        lines[#lines+1] = string.format(
+            "Group %d '%s': models=%d valid=%d owned=%d enemy=%d ally=%d unknown=%d checked=%d",
+            groupIndex,group.Name,modelCount,validCount,namedCount,enemyCount,allyCount,unknownCount,checked
+        )
+        if #samples > 0 then lines[#lines+1] = "  Samples: " .. table.concat(samples,", ") end
+    end
+    return lines
+end
+
 local function report()
     local rows = {
         "SPECTRA PHASE 1 DIAGNOSTICS / "..VERSION,
@@ -595,6 +671,8 @@ local function report()
         "No getgc, hooks, remote scripts, or writes to other character models.",
         "-- RECENT LOGS --"
     }
+    local sources = inspectDataSources()
+    for _, entry in ipairs(sources) do rows[#rows+1] = entry end
     for i=math.max(1,#logs-28),#logs do rows[#rows+1]=logs[i] end
     return table.concat(rows,"\n")
 end
@@ -641,7 +719,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.3.1",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.3.2",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -838,9 +916,12 @@ local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=1
 round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, probe, targets, recenter, esp on, esp off, clear, unload")
+    if input=="help" then log("INFO","Commands: help, status, probe, sources, targets, recenter, esp on, esp off, clear, unload")
     elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
+    elseif input=="sources" then
+        local sourceLines=inspectDataSources()
+        for _, entry in ipairs(sourceLines) do log("INFO",entry) end
     elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
     elseif input=="targets" then
         log("INFO","Candidates: "..#targets.."  verified="..stats.matched.." unverified="..stats.anonymous)
@@ -909,7 +990,7 @@ connect(RunService.RenderStepped,function(dt)
     if statAccumulator>=0.7 then
         statAccumulator=0
         if statusText and statusText.Parent then
-            statusText.Text=string.format("ESP %s  ·  %d targets / %d unknown  ·  %d shown  ·  %d FPS",state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
+            statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
         clampWindow(false)
         if debugSummary and debugSummary.Parent then
@@ -925,7 +1006,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.3.1 loaded. Right Shift: hide/show | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.3.2 loaded. Right Shift: hide/show | F8: debug | Ctrl+End: unload")
 log("INFO","Enemy-only tracking; unknown team/owner models are excluded, diagnostics show the reason")
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
