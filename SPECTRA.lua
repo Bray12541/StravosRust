@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.1.0
+    SPECTRA / PHASE 1                         v1.2.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: menu | F8: debug console | HOME: center | Unload: Settings
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.1.0"
+local VERSION = "1.2.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -37,7 +37,7 @@ local logs = {}
 local targets = {}
 local lastSource = "Not scanned"
 local lastScanDetails = "Not scanned"
-local stats = {discovered=0, matched=0, anonymous=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
+local stats = {discovered=0, matched=0, anonymous=0, teammates=0, skeletonRigs=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
 local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu
 local focusedTab = "ESP"
 local tabs = {}
@@ -46,6 +46,9 @@ local function refreshAllToggles()
     for _, refresh in ipairs(toggleRefreshers) do refresh() end
 end
 local scanAccumulator, renderAccumulator, statAccumulator = 10, 0, 0
+local MAX_DISTANCE = 1000
+local UPDATE_HZ = 50
+local UPDATE_PERIOD = 1 / UPDATE_HZ
 
 local C = {
     base = Color3.fromRGB(21, 24, 29),
@@ -69,16 +72,10 @@ local COLOR_MODES = {
 local state = {
     enabled = false,
     boxes = true,
-    names = true,
     distances = true,
-    health = true,
     tracers = false,
     skeleton = false,
     highlights = false,
-    ignoreTeammates = false,
-    anonymous = false,
-    maxDistance = 1500,
-    updateHz = 20,
     color = "Cyan"
 }
 
@@ -139,11 +136,19 @@ local function safeParent(gui)
     local ok = pcall(function() gui.Parent = game:GetService("CoreGui") end)
     return ok
 end
-local function teamColor(player)
-    if player and LocalPlayer.Team and player.Team then
-        if LocalPlayer.Team == player.Team then return Color3.fromRGB(110, 168, 244) end
-        return Color3.fromRGB(242, 121, 121)
+local function isTeammate(player)
+    if not player or player == LocalPlayer then return true end
+    -- Prefer verified Roblox team identities. Custom game teams may not
+    -- be represented by Player.Team / TeamColor.
+    if LocalPlayer.Team and player.Team then
+        return LocalPlayer.Team == player.Team
     end
+    if not LocalPlayer.Neutral and not player.Neutral then
+        return LocalPlayer.TeamColor == player.TeamColor
+    end
+    return false
+end
+local function markerColor()
     return COLOR_MODES[state.color] or C.accent
 end
 local function put(line, x1, y1, x2, y2, color, width)
@@ -170,15 +175,48 @@ end
 local function makeLine(parent)
     return create("Frame", {Visible=false, BorderSizePixel=0, BackgroundColor3=C.accent, ZIndex=20}, parent)
 end
+local MAX_SKELETON_LINES = 32
 local bonePairs = {
     {"Head","UpperTorso"}, {"UpperTorso","LowerTorso"},
-    {"UpperTorso","LeftUpperArm"}, {"LeftUpperArm","LeftLowerArm"},
-    {"UpperTorso","RightUpperArm"}, {"RightUpperArm","RightLowerArm"},
-    {"LowerTorso","LeftUpperLeg"}, {"LeftUpperLeg","LeftLowerLeg"},
-    {"LowerTorso","RightUpperLeg"}, {"RightUpperLeg","RightLowerLeg"},
+    {"UpperTorso","LeftUpperArm"}, {"LeftUpperArm","LeftLowerArm"}, {"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"}, {"RightUpperArm","RightLowerArm"}, {"RightLowerArm","RightHand"},
+    {"LowerTorso","LeftUpperLeg"}, {"LeftUpperLeg","LeftLowerLeg"}, {"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"}, {"RightUpperLeg","RightLowerLeg"}, {"RightLowerLeg","RightFoot"},
     {"Head","Torso"}, {"Torso","Left Arm"}, {"Torso","Right Arm"},
     {"Torso","Left Leg"}, {"Torso","Right Leg"}
 }
+-- Built at discovery time, not every frame. Motor6D connections handle
+-- renamed body parts; fallback pairs cover traditional R6/R15 rigs.
+local function collectSkeletonSegments(model)
+    local segments = {}
+    local function add(a, b)
+        if a and b and a ~= b and #segments < MAX_SKELETON_LINES then
+            segments[#segments+1] = {a, b}
+        end
+    end
+    for _, inst in ipairs(model:GetDescendants()) do
+        if #segments >= MAX_SKELETON_LINES then break end
+        if inst:IsA("Motor6D") then
+            local a, b = inst.Part0, inst.Part1
+            if a and b and a:IsDescendantOf(model) and b:IsDescendantOf(model)
+                and not inst.Name:lower():find("root") then
+                add(a, b)
+            end
+        elseif inst:IsA("Bone") and inst.Parent and inst.Parent:IsA("Bone") then
+            add(inst.Parent, inst)
+        end
+    end
+    if #segments == 0 then
+        for _, pair in ipairs(bonePairs) do
+            local a = model:FindFirstChild(pair[1], true)
+            local b = model:FindFirstChild(pair[2], true)
+            if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+                add(a, b)
+            end
+        end
+    end
+    return segments
+end
 local function newWidget(key)
     local w = {root = create("Frame", {
         Name="Marker", BackgroundTransparency=1, BorderSizePixel=0,
@@ -186,17 +224,11 @@ local function newWidget(key)
     }, overlayLayer), edges={}, skeleton={}}
     for i=1,4 do w.edges[i] = makeLine(w.root) end
     w.tracer = makeLine(w.root)
-    for i=1,#bonePairs do w.skeleton[i] = makeLine(w.root) end
-    w.name = textLabel(w.root, "", 12, C.white, true)
-    w.name.TextXAlignment = Enum.TextXAlignment.Center
-    w.name.TextStrokeTransparency = 0.4
-    w.name.ZIndex = 22
+    for i=1,MAX_SKELETON_LINES do w.skeleton[i] = makeLine(w.root) end
     w.distance = textLabel(w.root, "", 11, C.white)
     w.distance.TextXAlignment = Enum.TextXAlignment.Center
     w.distance.TextStrokeTransparency = 0.45
     w.distance.ZIndex = 22
-    w.hpBackground = create("Frame", {BackgroundColor3=C.border, BorderSizePixel=0, ZIndex=20}, w.root)
-    w.hpFill = create("Frame", {BackgroundColor3=C.green, BorderSizePixel=0, ZIndex=21}, w.hpBackground)
     widgets[key] = w
     return w
 end
@@ -246,22 +278,24 @@ end
 local function discoverTargets()
     if not alive then return end
     local seen, nextTargets = {}, {}
-    local standard, custom, checked, eligible, rejected = 0, 0, 0, 0, 0
+    local verified, unverified, checked, rejected, excluded, skeletonRigs = 0, 0, 0, 0, 0, 0
     local function admit(model, player, source)
         if seen[model] or #nextTargets >= 72 then return end
         seen[model] = true
         if player == LocalPlayer then return end
         local ok, root = validModel(model)
         if not ok then rejected += 1; return end
-        -- A generic renderable model is not necessarily a player. This is
-        -- only a candidate unless a player identity can be independently matched.
+        -- Unknown rigs cannot be safely classified by team. Keep them in
+        -- diagnostics only; never put them in the ESP tracking/render list.
+        if not player then unverified += 1; return end
+        if isTeammate(player) then excluded += 1; return end
+        local segments = collectSkeletonSegments(model)
+        if #segments > 0 then skeletonRigs += 1 end
         nextTargets[#nextTargets+1] = {
             model=model, root=root, player=player,
-            label=player and player.DisplayName or "Unverified rig",
-            source=source
+            label=player.DisplayName, source=source, bones=segments
         }
-        eligible += 1
-        if player then standard += 1 else custom += 1 end
+        verified += 1
     end
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
@@ -270,7 +304,6 @@ local function discoverTargets()
     end
     local rootFolder = Workspace:FindFirstChild("Players")
     if rootFolder then
-        -- Bounded breadth-first search within Workspace.Players ONLY.
         local queue = {{rootFolder,0}}
         local at = 1
         while at <= #queue and checked < 850 do
@@ -280,8 +313,7 @@ local function discoverTargets()
                 checked += 1
                 if checked > 850 then break end
                 if child:IsA("Model") then
-                    local owner = identifyPlayer(child)
-                    admit(child, owner, "Workspace.Players")
+                    admit(child, identifyPlayer(child), "Workspace.Players")
                     if depth < 2 then queue[#queue+1] = {child,depth+1} end
                 elseif child:IsA("Folder") and depth < 3 then
                     queue[#queue+1] = {child,depth+1}
@@ -297,11 +329,16 @@ local function discoverTargets()
     for key in pairs(widgets) do if not aliveKeys[key] then destroyWidget(key) end end
     targets = nextTargets
     stats.discovered = #targets
-    stats.matched = standard
-    stats.anonymous = custom
+    stats.matched = verified
+    stats.anonymous = unverified
+    stats.teammates = excluded
+    stats.skeletonRigs = skeletonRigs
     stats.rejected = rejected
     stats.scans += 1
-    lastScanDetails = string.format("candidates=%d verified=%d unverified=%d rejected=%d checked=%d players=%d", eligible,standard,custom,rejected,checked,#Players:GetPlayers())
+    lastScanDetails = string.format(
+        "tracked=%d unknown=%d teammatesExcluded=%d skeletonRigs=%d rejected=%d checked=%d players=%d",
+        verified, unverified, excluded, skeletonRigs, rejected, checked, #Players:GetPlayers()
+    )
 end
 
 local function projectBox(camera, model)
@@ -331,23 +368,26 @@ local function projectBox(camera, model)
     if w < 2 or h < 4 or w > viewport.X*2 or h > viewport.Y*2 then return nil end
     return minX,minY,maxX,maxY,cf.Position
 end
-local function updateSkeleton(w, model, camera, color)
-    if not state.skeleton then
-        for _, line in ipairs(w.skeleton) do line.Visible=false end
-        return
-    end
-    for i, pair in ipairs(bonePairs) do
-        local a,b = model:FindFirstChild(pair[1], true),model:FindFirstChild(pair[2], true)
-        local line = w.skeleton[i]
-        if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
-            local va, vb = camera:WorldToViewportPoint(a.Position),camera:WorldToViewportPoint(b.Position)
-            if va.Z > 0.5 and vb.Z > 0.5 then
-                put(line,va.X,va.Y,vb.X,vb.Y,color,1)
+local function updateSkeleton(w, target, camera, color)
+    local segments = state.skeleton and target.bones or nil
+    for i, line in ipairs(w.skeleton) do
+        local segment = segments and segments[i]
+        if segment then
+            local a, b = segment[1], segment[2]
+            if a and b and a.Parent and b.Parent then
+                local p1 = a:IsA("Bone") and a.WorldPosition or a.Position
+                local p2 = b:IsA("Bone") and b.WorldPosition or b.Position
+                local va, vb = camera:WorldToViewportPoint(p1), camera:WorldToViewportPoint(p2)
+                if va.Z > 0.5 and vb.Z > 0.5 then
+                    put(line, va.X, va.Y, vb.X, vb.Y, color, 1)
+                else
+                    line.Visible = false
+                end
             else
-                line.Visible=false
+                line.Visible = false
             end
         else
-            line.Visible=false
+            line.Visible = false
         end
     end
 end
@@ -376,7 +416,7 @@ end
 local function render()
     if not state.enabled or not overlayLayer then
         for _, w in pairs(widgets) do hideWidget(w) end
-        stats.rendered=0
+        stats.rendered = 0
         return
     end
     local camera = Workspace.CurrentCamera
@@ -386,69 +426,48 @@ local function render()
         local model = t.model
         local w = widgets[model]
         local shouldShow = model.Parent ~= nil and t.root and t.root.Parent ~= nil
-        if shouldShow and not state.anonymous and not t.player then shouldShow = false end
-        if shouldShow and state.ignoreTeammates and t.player and t.player.Team and LocalPlayer.Team and t.player.Team == LocalPlayer.Team then shouldShow=false end
+            and t.player and not isTeammate(t.player)
         local distance = 0
         if shouldShow then
             distance = (camera.CFrame.Position - t.root.Position).Magnitude
-            shouldShow = distance <= state.maxDistance
+            shouldShow = distance <= MAX_DISTANCE
         end
-        local left,top,right,bottom
+        local left, top, right, bottom
         if shouldShow then
-            left,top,right,bottom = projectBox(camera, model)
+            left, top, right, bottom = projectBox(camera, model)
             shouldShow = left ~= nil
         end
         if shouldShow then
             if not w then w = newWidget(model) end
-            local clr = t.player and teamColor(t.player) or C.orange
+            local clr = markerColor()
             done += 1
-            w.root.Visible=true
+            w.root.Visible = true
             local edges = w.edges
-            for i=1,4 do edges[i].Visible=state.boxes end
+            for i=1,4 do edges[i].Visible = state.boxes end
             if state.boxes then
                 put(edges[1],left,top,right,top,clr,1)
                 put(edges[2],right,top,right,bottom,clr,1)
                 put(edges[3],right,bottom,left,bottom,clr,1)
                 put(edges[4],left,bottom,left,top,clr,1)
             end
-            w.name.Visible=state.names
-            if state.names then
-                w.name.Text=t.label
-                w.name.Position=UDim2.fromOffset(left-40,top-21)
-                w.name.Size=UDim2.fromOffset(right-left+80,18)
-            end
-            w.distance.Visible=state.distances
+            w.distance.Visible = state.distances
             if state.distances then
-                w.distance.Text=string.format("%d studs",math.floor(distance+0.5))
-                w.distance.Position=UDim2.fromOffset(left-30,bottom+3)
-                w.distance.Size=UDim2.fromOffset(right-left+60,16)
+                w.distance.Text = string.format("%d studs", math.floor(distance+0.5))
+                w.distance.Position = UDim2.fromOffset(left-30,bottom+3)
+                w.distance.Size = UDim2.fromOffset(right-left+60,16)
             end
-            local hp=nil
-            if state.health then
-                local human=model:FindFirstChildOfClass("Humanoid")
-                if human and human.MaxHealth > 0 then hp=math.clamp(human.Health/human.MaxHealth,0,1) end
-            end
-            w.hpBackground.Visible = hp ~= nil
-            if hp then
-                local height = math.max(6,bottom-top)
-                w.hpBackground.Position=UDim2.fromOffset(left-7,top)
-                w.hpBackground.Size=UDim2.fromOffset(3,height)
-                w.hpFill.AnchorPoint=Vector2.new(0,1)
-                w.hpFill.Position=UDim2.fromScale(0,1)
-                w.hpFill.Size=UDim2.fromScale(1,hp)
-            end
-            w.tracer.Visible=state.tracers
+            w.tracer.Visible = state.tracers
             if state.tracers then
-                local viewport=camera.ViewportSize
+                local viewport = camera.ViewportSize
                 put(w.tracer,viewport.X/2,viewport.Y-10,(left+right)/2,bottom,clr,1)
             end
-            updateSkeleton(w,model,camera,clr)
+            updateSkeleton(w,t,camera,clr)
             updateHighlight(w,model,camera,clr)
         else
             hideWidget(w)
         end
     end
-    stats.rendered=done
+    stats.rendered = done
 end
 
 local function report()
@@ -462,13 +481,15 @@ local function report()
         "CurrentCamera: "..tostring(Workspace.CurrentCamera~=nil),
         "Folder: "..lastSource,
         "Discovery: "..lastScanDetails,
-        "Unverified model display (diagnostic): "..tostring(state.anonymous),
         "Visible targets: "..tostring(stats.rendered),
-        "Identity status: "..(stats.matched>0 and "verified targets available" or "NO verified player models; do not treat anonymous shapes as players"),
-        "FPS: "..string.format("%.0f",stats.fps).." / renderHz: "..tostring(state.updateHz),
+        "Identity status: "..(stats.matched>0 and "verified non-teammate targets available" or "NO verified non-teammate models; unverified rigs are never tracked"),
+        "FPS: "..string.format("%.0f",stats.fps).." / render target: 50 Hz (limited by FPS)",
         "Connections tracked: "..tostring(#connections),
         "Scans: "..tostring(stats.scans),
-        "Options: boxes="..tostring(state.boxes).." names="..tostring(state.names).." health="..tostring(state.health).." skeleton="..tostring(state.skeleton).." highlights="..tostring(state.highlights),
+        "Options: boxes="..tostring(state.boxes).." skeleton="..tostring(state.skeleton).." highlights="..tostring(state.highlights),
+        "Enemy-only tracking: "..tostring(stats.teammates).." teammates excluded (requires Roblox team data)",
+        "Fixed limits: 1000 studs / 50 Hz target",
+        "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.matched),
         "No getgc, hooks, remote scripts, or writes to other character models.",
         "-- RECENT LOGS --"
     }
@@ -518,7 +539,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.0",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.2",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 local close=create("TextButton",{Text="×",Font=Enum.Font.GothamMedium,TextSize=20,TextColor3=C.muted,
     BackgroundColor3=C.panel,Size=UDim2.fromOffset(28,26),Position=UDim2.new(1,-41,0,13),BorderSizePixel=0},top)
@@ -607,39 +628,6 @@ local function toggle(page,label,help,key)
     toggleRefreshers[#toggleRefreshers+1] = refresh
     refresh()
 end
-local function slider(page,label,help,key,min,max,step)
-    local f=create("Frame",{Size=UDim2.new(1,-3,0,72),BackgroundColor3=C.panel,BorderSizePixel=0},page)
-    round(f,6)
-    local t=textLabel(f,label,12,C.white,true);t.Position=UDim2.fromOffset(13,7);t.Size=UDim2.new(1,-100,0,19)
-    local val=textLabel(f,"",11,C.accent,true);val.TextXAlignment=Enum.TextXAlignment.Right
-    val.Position=UDim2.new(1,-95,0,7);val.Size=UDim2.fromOffset(81,19)
-    local bar=create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,
-        Size=UDim2.new(1,-28,0,5),Position=UDim2.fromOffset(14,41)},f)
-    round(bar,4)
-    local fill=create("Frame",{Size=UDim2.fromScale(0,1),BackgroundColor3=C.accent,BorderSizePixel=0},bar);round(fill,4)
-    local hit=create("TextButton",{BackgroundTransparency=1,Text="",Position=UDim2.fromOffset(0,-9),Size=UDim2.new(1,0,0,22)},bar)
-    local helpText=textLabel(f,help,10,C.muted);helpText.Position=UDim2.fromOffset(13,50);helpText.Size=UDim2.new(1,-25,0,16)
-    local holding=false
-    local function refresh()
-        val.Text=tostring(state[key])
-        fill.Size=UDim2.fromScale((state[key]-min)/(max-min),1)
-    end
-    local function update(x)
-        local pct=math.clamp((x-bar.AbsolutePosition.X)/math.max(1,bar.AbsoluteSize.X),0,1)
-        state[key]=math.clamp(math.floor((min+(max-min)*pct)/step+0.5)*step,min,max)
-        refresh()
-    end
-    connect(hit.InputBegan,function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 then holding=true;update(input.Position.X) end
-    end)
-    connect(UserInputService.InputChanged,function(input)
-        if holding and input.UserInputType==Enum.UserInputType.MouseMovement then update(input.Position.X) end
-    end)
-    connect(UserInputService.InputEnded,function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 then holding=false end
-    end)
-    refresh()
-end
 local function action(page,label,callback)
     local b=create("TextButton",{Text=label,Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=C.white,
         BackgroundColor3=C.panel2,BorderSizePixel=0,Size=UDim2.new(1,-3,0,34)},page)
@@ -649,21 +637,18 @@ local function action(page,label,callback)
 end
 
 local espPage=pages.ESP
-header(espPage,"Player visuals","Verified players by default · unverified rigs are diagnostic only")
+header(espPage,"Player visuals","Identified players only · excludes detected teammates")
 groupLabel(espPage,"DISPLAY")
-toggle(espPage,"Enable ESP","Master switch for all visual markers","enabled")
-toggle(espPage,"2D boxes","Screen-space outline around detected character models","boxes")
-toggle(espPage,"Names","Only verified identities show a real player name","names")
+toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
+toggle(espPage,"2D boxes","Screen-space rectangles around verified characters","boxes")
 toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
-toggle(espPage,"Health bars","Shown only when Humanoid health is replicated","health")
 toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
-toggle(espPage,"Skeleton","Works only when standard R15 joints are visible","skeleton")
+toggle(espPage,"Skeleton","Uses rig Motor6D joints, Bones, or standard limbs where present","skeleton")
 toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
-groupLabel(espPage,"FILTERS & PERFORMANCE")
-toggle(espPage,"Ignore teammates","Only applies when a target is matched to a Player","ignoreTeammates")
-toggle(espPage,"Show unverified rigs","Diagnostic only: these shapes may be props, NOT players","anonymous")
-slider(espPage,"Maximum distance","Targets outside this range are hidden","maxDistance",100,2500,100)
-slider(espPage,"Update frequency","2D marker refreshes per second","updateHz",10,30,5)
+groupLabel(espPage,"FIXED RULES")
+row(espPage,"Teammates excluded","Auto-filtered when Roblox team data is available")
+row(espPage,"1000 studs · 50 Hz","Hardcoded range and marker refresh target")
+
 local colorButton
 colorButton=action(espPage,"Marker color: Cyan  (click to cycle)",function()
     local order={"Cyan","Coral","Lime","White"}
@@ -745,7 +730,7 @@ round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
     if input=="help" then log("INFO","Commands: help, status, probe, targets, recenter, esp on, esp off, clear, unload")
-    elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." verified="..stats.matched.." unknown="..stats.anonymous.." fps="..math.floor(stats.fps).." connections="..#connections)
+    elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." tracked="..stats.matched.." excluded="..stats.teammates.." skeletonRigs="..stats.skeletonRigs.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
     elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
     elseif input=="targets" then
@@ -805,19 +790,18 @@ connect(RunService.RenderStepped,function(dt)
         scanAccumulator = 0
         safeCall("Discover",discoverTargets)
     end
-    local period=1/math.max(1,state.updateHz)
-    if renderAccumulator >= period then
-        renderAccumulator = 0
+    if renderAccumulator >= UPDATE_PERIOD then
+        renderAccumulator = renderAccumulator % UPDATE_PERIOD
         safeCall("Render",render)
     end
     if statAccumulator>=0.7 then
         statAccumulator=0
         if statusText and statusText.Parent then
-            statusText.Text=string.format("ESP %s  ·  %d verified / %d unverified  ·  %d shown  ·  %d FPS",state.enabled and "ON" or "OFF",stats.matched,stats.anonymous,stats.rendered,math.floor(stats.fps+0.5))
+            statusText.Text=string.format("ESP %s  ·  %d tracked / %d teammates excluded  ·  %d shown  ·  %d FPS",state.enabled and "ON" or "OFF",stats.matched,stats.teammates,stats.rendered,math.floor(stats.fps+0.5))
         end
         clampWindow(false)
         if debugSummary and debugSummary.Parent then
-            debugSummary.Text=string.format("%s\n%s   |   render %d Hz",lastSource,lastScanDetails,state.updateHz)
+            debugSummary.Text=string.format("%s\n%s   |   render target %d Hz",lastSource,lastScanDetails,UPDATE_HZ)
         end
     end
 end)
@@ -829,7 +813,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.1 loaded. Right Shift: menu | F8: debug | Home: center")
-log("INFO","Player identity must be verified; unverified rigs are hidden by default")
+log("INFO","SPECTRA Phase 1 v1.2 loaded. Right Shift: menu | F8: debug | Home: center")
+log("INFO","Only verified non-teammate players are tracked; unverified rigs remain diagnostic-only")
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
