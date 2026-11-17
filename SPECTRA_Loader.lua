@@ -1,9 +1,9 @@
--- SPECTRA loader / verified baseline v1.9.7
+-- SPECTRA loader / verified baseline v1.10.0
 -- Live branch is used when it is current AND actually compiles.
 -- A stale or un-compilable response falls back to the pinned, tested build.
 local BRANCH_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/06aa1e69203f933d523079d5e9296b89ead0656f/SPECTRA.lua"
-local MINIMUM_VERSION = "1.9.7"
+local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/af6e2f95086580f237f18ffc88607fa6096c3ed6/SPECTRA.lua"
+local MINIMUM_VERSION = "1.10.0"
 
 if type(loadstring) ~= "function" then
     warn("[SPECTRA Loader] Your execution environment does not provide loadstring")
