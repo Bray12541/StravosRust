@@ -1,8 +1,8 @@
 --[[
-    SPECTRA / PHASE 1                         v1.2.0
+    SPECTRA / PHASE 1                         v1.3.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
-    RSHIFT: menu | F8: debug console | HOME: center | Unload: Settings
+    RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
 
     Character data must already be replicated to the client. Custom game
     replication stores that do not expose renderable Workspace models will
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.2.0"
+local VERSION = "1.3.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -539,12 +539,20 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.2",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.3",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
-local close=create("TextButton",{Text="×",Font=Enum.Font.GothamMedium,TextSize=20,TextColor3=C.muted,
-    BackgroundColor3=C.panel,Size=UDim2.fromOffset(28,26),Position=UDim2.new(1,-41,0,13),BorderSizePixel=0},top)
-round(close,5)
-connect(close.MouseButton1Click,function() window.Visible=false end)
+-- Hide only changes menu visibility; ESP keeps running.
+local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
+    BackgroundColor3=C.panel,Size=UDim2.fromOffset(56,26),Position=UDim2.new(1,-166,0,13),BorderSizePixel=0},top)
+round(hideButton,5)
+connect(hideButton.MouseButton1Click,function()
+    window.Visible=false
+end)
+-- Unload removes the entire overlay and all SPECTRA event connections.
+local unloadButton=create("TextButton",{Text="Unload",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.white,
+    BackgroundColor3=C.panel2,Size=UDim2.fromOffset(88,26),Position=UDim2.new(1,-103,0,13),BorderSizePixel=0},top)
+round(unloadButton,5)
+connect(unloadButton.MouseButton1Click,shutdown)
 create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1),Position=UDim2.fromOffset(0,53)},window)
 local left=create("Frame",{Position=UDim2.fromOffset(0,54),Size=UDim2.new(0,145,1,-54),BackgroundColor3=C.sidebar,BorderSizePixel=0},window)
 create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(0,1,1,0),Position=UDim2.new(1,-1,0,0)},left)
@@ -687,6 +695,7 @@ groupLabel(settingsPage,"KEYBINDS")
 local keyText=row(settingsPage,"Right Shift","Show or hide the menu")
 local debugText=row(settingsPage,"F8","Open the diagnostic console")
 local homeText=row(settingsPage,"Home","Recenter the menu if it moves off-screen")
+row(settingsPage,"Ctrl + End","Unload SPECTRA without leaving the game")
 groupLabel(settingsPage,"CONTROL")
 action(settingsPage,"Center menu on screen",function() clampWindow(true); log("INFO","Menu recentered") end)
 action(settingsPage,"Rescan replicated models",function() discoverTargets();log("INFO","Manual scan: "..lastScanDetails) end)
@@ -770,7 +779,10 @@ connect(UserInputService.InputEnded,function(input)
 end)
 connect(UserInputService.InputBegan,function(input,gameProcessed)
     if gameProcessed or UserInputService:GetFocusedTextBox() then return end
-    if input.KeyCode==Enum.KeyCode.RightShift then
+    if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
+        shutdown()
+        return
+    elseif input.KeyCode==Enum.KeyCode.RightShift then
         window.Visible=not window.Visible
         if window.Visible then clampWindow(false) end
     elseif input.KeyCode==Enum.KeyCode.Home then
@@ -813,7 +825,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.2 loaded. Right Shift: menu | F8: debug | Home: center")
+log("INFO","SPECTRA Phase 1 v1.3 loaded. Right Shift: hide/show | F8: debug | Ctrl+End: unload")
 log("INFO","Only verified non-teammate players are tracked; unverified rigs remain diagnostic-only")
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
