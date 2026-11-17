@@ -170,18 +170,22 @@ local function getGroupRelation(model)
     local group = model
     for _ = 1, 4 do
         if not group or group == Workspace then break end
-        local nameCandidates = {
-            group:GetAttribute("Team"), group:GetAttribute("TeamName"),
-            group:GetAttribute("TeamId"), group.Name,
-        }
-        for _, candidate in ipairs(nameCandidates) do
-            if typeof(candidate) == "string" then
-                local t = TeamsService:FindFirstChild(candidate)
-                if t and t:IsA("Team") then
-                    return t == mine and "ally" or "enemy"
-                end
+        -- Test each candidate separately; ipairs({nil, ...}) would skip
+        -- later metadata and miss otherwise valid team folder names.
+        local function matchTeam(candidate)
+            if typeof(candidate) ~= "string" or candidate == "" then return nil end
+            local team = TeamsService:FindFirstChild(candidate)
+            if team and team:IsA("Team") then
+                return team == mine and "ally" or "enemy"
             end
+            return nil
         end
+        for _, field in ipairs({"Team", "TeamName", "TeamId"}) do
+            local relation = matchTeam(group:GetAttribute(field))
+            if relation then return relation end
+        end
+        local relation = matchTeam(group.Name)
+        if relation then return relation end
         group = group.Parent
     end
     return "unknown"
