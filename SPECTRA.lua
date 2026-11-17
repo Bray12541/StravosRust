@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.12.0
+    SPECTRA / PHASE 1                         v1.13.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.12.0"
+local VERSION = "1.13.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -87,7 +87,7 @@ local state = {
     recoilStrength = 100,
     speedHack = false, speedValue = 32,
     fly = false, flySpeed = 45,
-    noclip = false, infiniteJump = false,
+    infiniteJump = false,
     highJump = false, jumpPower = 96,
     bunnyHop = false, noFallDamage = false,
     spinbot = false, spinRate = 300,
@@ -1559,14 +1559,13 @@ end
 
 
 -- SESSION-ONLY CHARACTER CALIBRATION ------------------------------------------
--- Manual, explicit confirmation of a camera-followed model after an opt-in
--- input/motion observation. This is NOT Roblox's ownership verification.
--- Pending/confirmed models are never persisted and expire on camera or rig
--- changes, remote ownership matches, or a conflicting Player.Character.
+-- Automatic calibration after locally observed WASD and camera-followed rig
+-- movement correlate over a bounded 3-second window; NOT ownership proof.
+-- Session calibration is revoked when the camera or rig changes.
 local SelfCalibration=(function()
     local cal={
         pending=nil,active=nil,status="Watching for first spawn",
-        rearmRequested=false,initialCaptureArmed=true
+        rearmRequested=false,initialCaptureArmed=true,retryAt=0
     }
     local function currentContext()
         local camera=Workspace.CurrentCamera
@@ -1633,7 +1632,7 @@ local SelfCalibration=(function()
             cal.rearmRequested=true
         end
         cal.status=cal.rearmRequested
-            and "Redeploy detected: walk briefly for automatic 3s check, then confirm in Compat"
+            and "Redeploy detected: walk for automatic 3s character check"
             or "Not calibrated: "..tostring(reason or "cleared")
         if wasActive or hadPending then
             print("[SPECTRA CAL] "..cal.status)
@@ -1642,12 +1641,19 @@ local SelfCalibration=(function()
     local function offer(observation)
         cal.pending=nil
         if not observation or observation.changedSubject~=0
-            or observation.samplesWithInput<9 or observation.motionAndInput<8
-            or observation.secondsWithInput<1.5 or observation.rootPath<12 then
+            or observation.samplesWithInput<10 or observation.motionAndInput<9
+            or observation.humanoidMoveSamples<8
+            or observation.secondsWithInput<1.5 or observation.rootPath<12
+            or math.abs(observation.rootPath-observation.cameraPath)>8 then
             cal.status="No eligible candidate: insufficient stable input/motion evidence"
             return false
         end
         local camera,subject,model,root=currentContext()
+        if camera~=observation.firstCamera or subject~=observation.firstSubject
+            or model~=observation.firstModel or root~=observation.firstRoot then
+            cal.status="No eligible candidate: camera/model changed since observation"
+            return false
+        end
         local candidate={camera=camera,subject=subject,model=model,root=root,time=os.clock()}
         local ok,reason=verifyContext(candidate)
         if not ok then
@@ -1659,14 +1665,14 @@ local SelfCalibration=(function()
             return false
         end
         cal.pending=candidate
-        cal.status="Candidate ready: "..model.Name.." | owner UNVERIFIED; confirm manually in Compat"
+        cal.status="Movement-matched candidate: "..model.Name.." | ownership UNVERIFIED; validating"
         print("[SPECTRA CAL] "..cal.status)
         return true
     end
     local function confirm()
         local p=cal.pending
         if not p then
-            log("WARN","No candidate. Move with WASD for the automatic 3-second check, then confirm.")
+            log("WARN","No movement-matched candidate. Walk to start an automatic 3-second check.")
             return false
         end
         if os.clock()-p.time>60 then
@@ -1679,10 +1685,10 @@ local SelfCalibration=(function()
         cal.pending=nil
         cal.rearmRequested=false
         cal.initialCaptureArmed=false
-        cal.status="SESSION-CONFIRMED camera-followed model "..p.model.Name
-            .." (ownership NOT verified; client-only attempts)"
+        cal.status="AUTO-CALIBRATED movement-matched model "..p.model.Name
+            .." (owner UNVERIFIED; local modifiers only)"
         print("[SPECTRA CAL] "..cal.status)
-        log("WARN","Manual camera-rig confirmation is not Roblox ownership proof. Server acceptance remains unverified.")
+        log("WARN","Automatic camera-rig calibration is input correlation, NOT ownership proof. Server acceptance remains unverified.")
         return true
     end
     local function validate()
@@ -1696,7 +1702,7 @@ local SelfCalibration=(function()
     end
     local function readyForRearm()
         if not (cal.rearmRequested or cal.initialCaptureArmed)
-            or cal.active or cal.pending then return false end
+            or cal.active or cal.pending or os.clock()<cal.retryAt then return false end
         local camera,subject,model,root=currentContext()
         if not camera or not subject or not subject:IsA("Humanoid")
             or not model or not root then return false end
@@ -1707,6 +1713,15 @@ local SelfCalibration=(function()
         cal.rearmRequested=false
         cal.initialCaptureArmed=false
     end
+    local function retry(reason)
+        cal.pending=nil
+        cal.active=nil
+        cal.rearmRequested=true
+        cal.initialCaptureArmed=false
+        cal.retryAt=os.clock()+2
+        cal.status="Calibration deferred: "..tostring(reason)
+            ..". Keep walking after 2 seconds to retry."
+    end
     local function status()
         if cal.active then validate() end
         if cal.pending then
@@ -1716,6 +1731,7 @@ local SelfCalibration=(function()
         return cal.status
     end
     cal.offer=offer
+    cal.retry=retry
     cal.readyForRearm=readyForRearm
     cal.markRearmStarted=markRearmStarted
     cal.confirm=confirm
@@ -1726,7 +1742,7 @@ local SelfCalibration=(function()
     return cal
 end)()
 
--- MOVEMENT MODIFIERS: verified or explicitly session-confirmed self-rig only.
+-- MOVEMENT MODIFIERS: verified or automatically movement-matched session rig only.
 -- Private function scope avoids exhausting Luau main-chunk local registers.
 local Movement = (function()
     -- A custom game controller
@@ -1736,12 +1752,12 @@ local Movement = (function()
         saved=nil,lastScan=0,lastJump=0,lastHop=0,spinAngle=0,errors=0,
         lastProbe=nil,measuredSpeed=0,measuredVertical=0,
         spaceHeld=false,antiOffset=0,verifiedFrames=0,unavailableFrames=0,
-        originalHum=nil,collisions=setmetatable({},{__mode="k"}),
-        writes={speed=0,fly=0,noclip=0,jump=0,fall=0,tp=0,spin=0,anti=0}
+        originalHum=nil,
+        writes={speed=0,fly=0,jump=0,fall=0,tp=0,spin=0,anti=0}
     }
 
     local function movementHasModes()
-        return state.speedHack or state.fly or state.noclip or state.infiniteJump
+        return state.speedHack or state.fly or state.infiniteJump
             or state.highJump or state.bunnyHop or state.noFallDamage
             or state.spinbot or state.antiAim
     end
@@ -1766,12 +1782,6 @@ local Movement = (function()
         end
         movement.originalHum=nil
         movement.antiOffset=0
-        for part,collision in pairs(movement.collisions) do
-            if part and part.Parent then
-                pcall(function() part.CanCollide=collision end)
-            end
-            movement.collisions[part]=nil
-        end
     end
 
     local function setMovementRig(model,source)
@@ -1790,7 +1800,7 @@ local Movement = (function()
             movement.antiOffset=0
         end
         movement.status=(SelfCalibration.isCurrent(model)
-            and "Session-confirmed camera rig; ownership UNVERIFIED ("..source..")"
+            and "Movement-matched camera rig; ownership UNVERIFIED ("..source..")"
             or "Verified local character ("..source..")")
         return true
     end
@@ -2026,7 +2036,6 @@ local Movement = (function()
             "Session calibration: "..SelfCalibration.statusText(),
             status("Speed",state.speedHack),
             status("Fly",state.fly),
-            status("Noclip",state.noclip),
             status("Infinite Jump",state.infiniteJump),
             status("High Jump",state.highJump),
             status("Bunny Hop",state.bunnyHop),
@@ -2035,8 +2044,8 @@ local Movement = (function()
             status("Anti Aim",state.antiAim),
             string.format("Measured root velocity: %.1f horizontal / %.1f vertical studs/s",movement.measuredSpeed,movement.measuredVertical),
             string.format("Frames with verified local rig: %d | unavailable checks: %d",movement.verifiedFrames,movement.unavailableFrames),
-            string.format("Write attempts: speed=%d fly=%d noclip=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
-                w.speed,w.fly,w.noclip,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
+            string.format("Write attempts: speed=%d fly=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
+                w.speed,w.fly,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
             movement.lastProbe or "Probe: not run (use modprobe)",
             "Client camera movement cannot substitute for a missing local character.",
             "Client-only writes cannot guarantee server-side fall-damage immunity, flight, teleport, or anti-aim."
@@ -2051,7 +2060,7 @@ local Movement = (function()
         local newSpacePress=spaceDown and not movement.spaceHeld
         movement.spaceHeld=spaceDown
         if not movementHasModes() then
-            if movement.originalHum or next(movement.collisions) or movement.antiOffset~=0 then
+            if movement.originalHum or movement.antiOffset~=0 then
                 restoreMovement()
             end
             local verified=movement.root and movement.root.Parent and movement.model and movement.model.Parent
@@ -2082,19 +2091,6 @@ local Movement = (function()
                 h.UseJumpPower=true;h.JumpPower=state.jumpPower
             else h.JumpPower=old.jump;h.JumpHeight=old.height;h.UseJumpPower=old.useJump end
             h.PlatformStand=state.fly or old.stand
-        end
-        if state.noclip then
-            for _,part in ipairs(model:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    if movement.collisions[part]==nil then movement.collisions[part]=part.CanCollide end
-                    if part.CanCollide then part.CanCollide=false;movement.writes.noclip+=1 end
-                end
-            end
-        else
-            for part,collision in pairs(movement.collisions) do
-                if part.Parent then part.CanCollide=collision end
-                movement.collisions[part]=nil
-            end
         end
         local dir=movementDirection()
         local v=root.AssemblyLinearVelocity
@@ -2216,7 +2212,8 @@ local Compat=(function()
         end
         if automaticCheck then SelfCalibration.markRearmStarted() end
         compat.observation={
-            duration=3,
+            duration=3,firstCaptured=false,
+            firstCamera=nil,firstSubject=nil,firstModel=nil,firstRoot=nil,
             elapsed=0,accumulated=0,secondsWithInput=0,samples=0,
             samplesWithInput=0,samplesWithMotion=0,
             motionAndInput=0,changedSubject=0,
@@ -2227,8 +2224,8 @@ local Compat=(function()
         compat.lastObservation=(automaticCheck and "Automatic character recheck" or "Manual recheck")
             ..": recording 3 seconds of movement input and camera-followed model."
         log("INFO",automaticCheck
-            and "Automatic read-only 3s movement check started. Continue walking; confirmation still required."
-            or "Read-only 3-second movement observation started. Close menu and walk with WASD.")
+            and "Automatic 3s movement check started. Stable input-matched camera model will calibrate without a click."
+            or "Read-only 3s observation started. Walk with WASD; eligible model auto-calibrates.")
     end
     local function sampleObservation(dt)
         local c=compat.observation
@@ -2255,6 +2252,16 @@ local Compat=(function()
             local root=model and readable(function() return getRoot(model) end,nil) or nil
             local rootPosition=root and readable(function() return root.Position end,nil) or nil
             local cameraPosition=camera and readable(function() return camera.CFrame.Position end,nil) or nil
+            if not c.firstCaptured then
+                c.firstCaptured=true
+                c.firstCamera=camera
+                c.firstSubject=subject
+                c.firstModel=model
+                c.firstRoot=root
+            elseif camera~=c.firstCamera or subject~=c.firstSubject
+                or model~=c.firstModel or root~=c.firstRoot then
+                c.changedSubject+=1
+            end
             local inputDown=observationKeyDown()
             if inputDown then
                 c.samplesWithInput+=1
@@ -2303,8 +2310,14 @@ local Compat=(function()
                 c.duration,status,c.samples,c.secondsWithInput,c.samplesWithMotion,c.motionAndInput,
                 c.humanoidMoveSamples,c.changedSubject,c.rootPath,c.cameraPath)
             print("[SPECTRA COMPAT MOTION] "..compat.lastObservation:gsub("\n"," | "))
-            SelfCalibration.offer(c)
-            log("INFO","Read-only movement observation completed; run compat to view result")
+            if SelfCalibration.offer(c) then
+                if not SelfCalibration.confirm() then
+                    SelfCalibration.retry("camera/model changed before activation")
+                end
+            else
+                SelfCalibration.retry("insufficient stable, matching input and model movement")
+            end
+            log("INFO","Movement observation completed: "..SelfCalibration.statusText())
         end
     end
 
@@ -2314,7 +2327,7 @@ local Compat=(function()
             rows[#rows+1]=text
         end
         line("SPECTRA COMPATIBILITY / v"..VERSION.." / "..os.date("%Y-%m-%d %H:%M:%S"))
-        line("Inspector: READ-ONLY Roblox-exposed data. Manual session confirmation can enable LOCAL modifier attempts; ownership/server effects UNVERIFIED.")
+        line("Inspector: READ-ONLY Roblox-exposed data. Eligible movement-matched camera models can AUTO-CALIBRATE for LOCAL modifier attempts; ownership/server effects UNVERIFIED.")
         line("Game PlaceId: "..tostring(readable(function() return game.PlaceId end,"unknown")))
         line("Player instances: "..tostring(readable(function() return #Players:GetPlayers() end,0)))
         line("")
@@ -2492,9 +2505,9 @@ local Compat=(function()
             line("Humanoid JumpPower: "..tostring(readable(function() return hum.JumpPower end,"unknown")))
             line("Humanoid FloorMaterial: "..readEnum(readable(function() return hum.FloorMaterial end,nil)))
         end
-        local isManual=candidate and SelfCalibration.isCurrent(candidate)
-        local status=isManual
-            and "SESSION-CALIBRATED: camera-followed rig exposed; true ownership and server effects UNVERIFIED"
+        local isCalibrated=candidate and SelfCalibration.isCurrent(candidate)
+        local status=isCalibrated
+            and "AUTO-CALIBRATED: camera-followed rig exposed; true ownership and server effects UNVERIFIED"
             or category(candidate,root,hum)
         line("Movement API: "..status)
         line("Session camera-model calibration: "..SelfCalibration.statusText())
@@ -2521,9 +2534,9 @@ local Compat=(function()
         line("")
         line("[FEATURE CAPABILITY / EVIDENCE ONLY]")
         if not root or not candidate then
-            line("Speed / Fly / Noclip / Jump / Teleport / Spin: UNAVAILABLE; no verified writable self-rig")
+            line("Speed / Fly / Jump / Teleport / Spin: UNAVAILABLE; no verified writable self-rig")
         elseif root.Anchored then
-            line("Speed / Fly / Noclip / Jump / Teleport / Spin: RESTRICTED; root anchored")
+            line("Speed / Fly / Jump / Teleport / Spin: RESTRICTED; root anchored")
         else
             line("Movement modifiers: local BasePart exists; server-accepted effect NOT VERIFIED")
             line("Humanoid movement controls: "..(hum and "exposed" or "NOT EXPOSED"))
@@ -2891,7 +2904,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.12.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.13.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3095,7 +3108,7 @@ local function launchSpectraUI()
         log("INFO",Movement.probe())
         log("INFO",Movement.data.status)
     end)
-    row(modifiersPage,"Availability","Calibrate in Compat; ON does not guarantee a working modifier")
+    row(modifiersPage,"Availability","Auto-calibrates after ~3s walking; server results unverified")
     groupLabel(modifiersPage,"RECOIL")
     toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
     settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
@@ -3114,7 +3127,6 @@ local function launchSpectraUI()
     settingSlider(modifiersPage,"Speed","Limited to 50 studs/s to avoid observed choppiness","speedValue",16,50,2,"")
     toggle(modifiersPage,"Fly","Experimental: server may reset deployment; auto-OFF on character change","fly")
     settingSlider(modifiersPage,"Fly speed","Target flight speed","flySpeed",15,120,5,"")
-    toggle(modifiersPage,"Noclip","Turns off collisions on your verified character","noclip")
     toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
     toggle(modifiersPage,"High Jump","Increases local jump impulse","highJump")
     settingSlider(modifiersPage,"Jump power","Impulse for High Jump","jumpPower",48,160,4,"")
@@ -3179,16 +3191,15 @@ local function launchSpectraUI()
         log("INFO","Compatibility snapshot printed with [SPECTRA COMPAT] prefix")
     end)
     action(compatPage,"Start 3s WASD + camera motion observation",Compat.startObservation)
-    action(compatPage,"Confirm tracked model for this session",SelfCalibration.confirm)
     action(compatPage,"Clear session character calibration",function()
         Movement.restore()
         Movement.data.model=nil;Movement.data.root=nil;Movement.data.humanoid=nil
         SelfCalibration.clear("Cleared by user")
     end)
     action(compatPage,"Copy compatibility report",Compat.copy)
-    row(compatPage,"Safety note","Confirmation is not ownership proof; spectator targets remain possible")
-    row(compatPage,"Redeploy recovery","Walk for ~3s after spawn/redeploy, then click Confirm once")
-    row(compatPage,"How to use","Automatic 3s check on first spawn and redeploy; confirmation is manual")
+    row(compatPage,"Safety note","Auto-calibration is not ownership proof; spectating cannot be ruled out")
+    row(compatPage,"Redeploy recovery","Walk ~3s after every spawn; no Confirm button needed")
+    row(compatPage,"How to use","Auto-check starts when walking; clears on camera/model change")
     local compatReportView=create("TextBox",{
         Text=Compat.text,TextEditable=false,MultiLine=true,ClearTextOnFocus=false,
         Font=Enum.Font.Code,TextSize=10,TextWrapped=true,
@@ -3289,7 +3300,7 @@ local function launchSpectraUI()
     round(run,5)
     local function runCommand(raw)
         local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, compatconfirm, compatclear, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, compatclear, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
         elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
             log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
         elseif input=="compat" then
@@ -3299,8 +3310,6 @@ local function launchSpectraUI()
             end)
         elseif input=="compatmove" then
             safeCall("Read-only input and motion observation",Compat.startObservation)
-        elseif input=="compatconfirm" then
-            safeCall("Session character confirmation",SelfCalibration.confirm)
         elseif input=="compatclear" then
             Movement.restore()
             Movement.data.model=nil;Movement.data.root=nil;Movement.data.humanoid=nil
@@ -3535,7 +3544,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.12.0 loaded. 50 speed cap, automatic 3s spawn check, flight reset on character loss")
+    log("INFO","SPECTRA Phase 1 v1.13.0 loaded. Auto calibration after movement correlation, Noclip removed, speed capped 50")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
