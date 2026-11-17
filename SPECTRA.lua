@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.8
+    SPECTRA / PHASE 1                         v1.8.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.8"
+local VERSION = "1.8.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -83,6 +83,8 @@ local state = {
     aimHoldRmb = true,
     aimPoint = "Head",
     aimMethod = "Auto",
+    noRecoil = false,
+    recoilStrength = 100,
     color = "Cyan"
 }
 
@@ -1405,6 +1407,147 @@ local function runAimbot(dt)
     recordAimGate("tracking","Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")",true)
 end
 
+
+-- MODIFIERS: EXPERIMENTAL CAMERA RECOIL COMPENSATION --------------------------
+-- Estimates upward camera displacement while firing and attempts to reduce
+-- it. This does not change weapon recoil, bullet spread, damage or hit logic.
+-- Scriptable game cameras may overwrite these visual changes at any time.
+local recoilData={
+    active=false,anchorPitch=nil,held=false,lastStatus="Off",
+    writeAttempts=0,writeSuccess=0,writeErrors=0,callbacks=0,
+    suppressedDegrees=0,lastUpwardDegrees=0,fireFrames=0,
+    correctionCamera=nil,correctionConn=nil,guard=false,
+    correctionsThisFrame=0
+}
+
+local function getCameraPitch(cf)
+    return math.asin(math.clamp(cf.LookVector.Y,-1,1))
+end
+
+local function getRecoilReport()
+    return string.format(
+        "No Recoil: %s | strength: %d%% | %s\nCamera recoil adjustments: %d/%d | callback corrections: %d | errors: %d\nLast upward camera deviation: %.2f deg | cumulative attempted compensation: %.1f deg\nVisual-only compensation; weapon recoil and bullet spread are not modified.",
+        state.noRecoil and "ON" or "OFF",state.recoilStrength,recoilData.lastStatus,
+        recoilData.writeSuccess,recoilData.writeAttempts,recoilData.callbacks,
+        recoilData.writeErrors,recoilData.lastUpwardDegrees,recoilData.suppressedDegrees
+    )
+end
+
+local function detachRecoilCamera()
+    recoilData.active=false
+    recoilData.held=false
+    recoilData.anchorPitch=nil
+    if recoilData.correctionConn then
+        pcall(function() recoilData.correctionConn:Disconnect() end)
+        recoilData.correctionConn=nil
+    end
+    recoilData.correctionCamera=nil
+end
+
+local function compensateRecoilCamera(camera,fromEvent)
+    if not recoilData.active or not recoilData.anchorPitch or recoilData.guard then return end
+    if fromEvent and recoilData.correctionsThisFrame>=2 then return end
+    if not camera or camera~=Workspace.CurrentCamera then return end
+    local cf=camera.CFrame
+    local pitch=getCameraPitch(cf)
+    local upward=pitch-recoilData.anchorPitch
+    recoilData.lastUpwardDegrees=math.deg(math.max(0,upward))
+    if upward<=math.rad(0.08) then
+        if upward<0 then
+            -- Never force a camera that is already pitching down to look up.
+            recoilData.anchorPitch=pitch
+        end
+        return
+    end
+    local strength=math.clamp(state.recoilStrength/100,0,1)
+    local compensatedPitch=pitch-upward*strength
+    local horizontal=Vector3.new(cf.LookVector.X,0,cf.LookVector.Z)
+    if horizontal.Magnitude<0.01 then return end
+    local flat=horizontal.Unit
+    local direction=Vector3.new(flat.X*math.cos(compensatedPitch),math.sin(compensatedPitch),flat.Z*math.cos(compensatedPitch))
+    recoilData.writeAttempts+=1
+    recoilData.guard=true
+    local ok,err=pcall(function()
+        camera.CFrame=CFrame.lookAt(cf.Position,cf.Position+direction)
+    end)
+    recoilData.guard=false
+    if ok then
+        recoilData.writeSuccess+=1
+        recoilData.suppressedDegrees+=math.deg(upward*strength)
+        if fromEvent then recoilData.callbacks+=1; recoilData.correctionsThisFrame+=1 end
+        recoilData.lastStatus="Compensating upward camera kick (experimental)"
+    else
+        recoilData.writeErrors+=1
+        recoilData.lastStatus="Camera modification failed"
+        if recoilData.writeErrors<=3 then
+            log("ERROR","Recoil compensation error: "..tostring(err))
+        end
+        recoilData.active=false
+    end
+end
+
+local function observeRecoilCamera(camera)
+    if recoilData.correctionCamera==camera then return end
+    detachRecoilCamera()
+    if not camera then return end
+    recoilData.correctionCamera=camera
+    recoilData.correctionConn=connect(camera:GetPropertyChangedSignal("CFrame"),function()
+        if alive and recoilData.active and not recoilData.guard and state.noRecoil
+            and not (window and window.Visible) and not pickerActive then
+            compensateRecoilCamera(camera,true)
+        end
+    end)
+end
+
+local function updateRecoilModifier()
+    recoilData.correctionsThisFrame=0
+    if not alive or not state.noRecoil then
+        recoilData.active=false
+        recoilData.held=false
+        recoilData.anchorPitch=nil
+        recoilData.lastStatus="Off"
+        return
+    end
+    local camera=Workspace.CurrentCamera
+    if not camera then
+        recoilData.active=false
+        recoilData.held=false
+        recoilData.lastStatus="No camera"
+        return
+    end
+    if (window and window.Visible) or pickerActive
+        or UserInputService:GetFocusedTextBox() then
+        recoilData.active=false
+        recoilData.held=false
+        recoilData.anchorPitch=nil
+        recoilData.lastStatus="Waiting for gameplay (menu open)"
+        return
+    end
+    local ok,mouseHeld=pcall(function()
+        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+    end)
+    if not ok then
+        recoilData.active=false
+        recoilData.lastStatus="Mouse button polling unavailable"
+        return
+    end
+    if not mouseHeld then
+        recoilData.active=false
+        recoilData.held=false
+        recoilData.anchorPitch=nil
+        recoilData.lastStatus="Waiting for left mouse (fire)"
+        return
+    end
+    observeRecoilCamera(camera)
+    if not recoilData.held then
+        recoilData.anchorPitch=getCameraPitch(camera.CFrame)
+        recoilData.held=true
+    end
+    recoilData.active=true
+    recoilData.fireFrames+=1
+    compensateRecoilCamera(camera,false)
+end
+
 -- CAMERA & INPUT DIAGNOSTICS ----------------------------------------------
 -- Read-only observations. These measurements cannot tell us what direction
 -- Phantom Forces uses for server-validated shots or prove source-code behavior.
@@ -1504,6 +1647,7 @@ local function getInputDiagnosticsLines()
         string.format("Camera stabilization: %s | corrections: %d | conflicts: %d | errors: %d",
             aimCorrectionActive and "active" or "inactive",
             aimCorrectionCount,aimCorrectionObservations,aimCorrectionErrors),
+        getRecoilReport(),
         "Mouse reports and camera writes do not prove weapon-aim control."
     }
     return lines
@@ -1633,6 +1777,7 @@ local function report()
         "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
         "Aim RMB setting: "..tostring(state.aimHoldRmb).." | "..getAimGateDiagnostics(),
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
+        getRecoilReport(),
         "Aim last active: "..aimLastActiveStatus,
         "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
             .." | suspected overrides: "..aimCameraResetEvents,
@@ -1672,6 +1817,7 @@ local function shutdown()
     alive=false
     pcall(function() RunService:UnbindFromRenderStep(AIM_RENDER_BIND) end)
     aimRmbHeld=false
+    detachRecoilCamera()
     disableAimCorrection()
     if aimObservedCameraConnection then
         pcall(function() aimObservedCameraConnection:Disconnect() end)
@@ -1717,7 +1863,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.8",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.8.0",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1741,7 +1887,7 @@ statusText=textLabel(footer,"Initializing...",10,C.muted)
 statusText.Position=UDim2.fromOffset(17,4);statusText.Size=UDim2.new(1,-34,1,-8)
 local pages={}
 local tabButtons={}
-for index,name in ipairs({"Aimbot","ESP","Settings","Debug"}) do
+for index,name in ipairs({"Aimbot","ESP","Modifiers","Settings","Debug"}) do
     local b=create("TextButton",{
         Text=name,TextSize=12,Font=Enum.Font.GothamMedium,
         TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,
@@ -1911,6 +2057,21 @@ groupLabel(aimPage,"STATUS")
 local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
 aimStatusText.Size=UDim2.new(1,-3,0,24)
 
+local modifiersPage=pages.Modifiers
+header(modifiersPage,"Modifiers","Local visual gameplay adjustments")
+groupLabel(modifiersPage,"RECOIL")
+toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
+settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
+row(modifiersPage,"Limitations","Camera-only adjustment; actual weapon recoil and spread unchanged")
+groupLabel(modifiersPage,"STATUS")
+local recoilStatusText=textLabel(modifiersPage,"Off",11,C.muted)
+recoilStatusText.Size=UDim2.new(1,-3,0,42)
+recoilStatusText.TextWrapped=true
+groupLabel(modifiersPage,"NOTES")
+local recoilNote=textLabel(modifiersPage,"Tests require holding fire with the menu hidden. If the game controls recoil separately from Camera.CFrame, no recoil reduction may be visible.",11,C.muted)
+recoilNote.Size=UDim2.new(1,-3,0,52)
+recoilNote.TextWrapped=true
+
 local espPage=pages.ESP
 header(espPage,"Player visuals","Configure your in-game overlay")
 groupLabel(espPage,"DISPLAY")
@@ -2030,13 +2191,17 @@ local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=1
 round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, inputdiag, copyinput, resetinput, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+    if input=="help" then log("INFO","Commands: help, status, inputdiag, copyinput, resetinput, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
     elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
         log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="inputdiag" then
         for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
     elseif input=="copyinput" then copyInputDiagnostics()
     elseif input=="resetinput" then resetInputDiagnostics();log("INFO","Camera & input counters reset")
+    elseif input=="recoilstatus" then
+        for entry in getRecoilReport():gmatch("[^\n]+") do log("INFO",entry) end
+    elseif input=="norecoil on" then state.noRecoil=true;refreshAllToggles();log("INFO","Experimental camera recoil compensation enabled")
+    elseif input=="norecoil off" then state.noRecoil=false;refreshAllToggles();log("INFO","Camera recoil compensation disabled")
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
     elseif input=="sources" then
         local sourceLines=inspectDataSources()
@@ -2137,6 +2302,10 @@ connect(RunService.RenderStepped,function(dt)
         if aimStatusText and aimStatusText.Parent then
             aimStatusText.Text=aimStatus
         end
+        if recoilStatusText and recoilStatusText.Parent then
+            recoilStatusText.Text=string.format("%s | %d writes | %.1f deg attempted",
+                recoilData.lastStatus,recoilData.writeSuccess,recoilData.suppressedDegrees)
+        end
         if statusText and statusText.Parent then
             statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
@@ -2164,6 +2333,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     end
     aimObservedCamera=nil
     disableAimCorrection()
+    detachRecoilCamera()
     for _,w in pairs(widgets) do if w.highlight then w.highlight:Destroy();w.highlight=nil end end
     clampWindow(false)
     log("INFO","Camera changed; optional highlights reset")
@@ -2182,12 +2352,22 @@ local aimBindOk,aimBindError=pcall(function()
             aimLastGameplayTime=os.date("%H:%M:%S")
             if aimErrors<=3 then log("ERROR","Aimbot update failed: "..tostring(err)) end
         end
+        -- Recoil camera compensation is a separate modifier and may run even
+        -- while aimbot is disabled. It never modifies weapon or network state.
+        local recoilOK,recoilError=pcall(updateRecoilModifier)
+        if not recoilOK then
+            recoilData.writeErrors+=1
+            recoilData.lastStatus="Modifier runtime error"
+            if recoilData.writeErrors<=3 then
+                log("ERROR","Recoil modifier failed: "..tostring(recoilError))
+            end
+        end
     end)
 end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.8 loaded. Persistent aim gate diagnostics; ESP+Skeleton default ON | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.8.0 loaded. Modifiers tab with experimental camera recoil control | ESP+Skeleton ON")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
