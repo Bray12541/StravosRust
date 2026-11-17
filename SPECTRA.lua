@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.9.7
+    SPECTRA / PHASE 1                         v1.10.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.9.7"
+local VERSION = "1.10.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1976,6 +1976,195 @@ local Movement = (function()
     }
 end)()
 
+
+-- READ-ONLY ROBLOX COMPATIBILITY INSPECTOR -----------------------------------
+-- Uses public, replicated objects only. Never modifies camera, character,
+-- weapon, inputs, events or server state. No hooks, memory reads or injections.
+-- Reports are explicitly labeled "unverified" where replication/server control
+-- cannot be established from a client-side observation.
+local Compat=(function()
+    local compat={text="No snapshot yet",lastTime="never",view=nil}
+    local function readable(fn,fallback)
+        local ok,value=pcall(fn)
+        if ok and value~=nil then return value end
+        return fallback
+    end
+    local function bool(value)
+        return value and "yes" or "no"
+    end
+    local function readEnum(value)
+        return readable(function() return value.Name end,"unavailable")
+    end
+    local function category(character,rig,humanoid)
+        if not character then return "UNAVAILABLE: no positively identified local character" end
+        if not rig or not rig.Parent then return "UNAVAILABLE: verified model has no usable BasePart" end
+        if rig.Anchored then return "RESTRICTED: local root is anchored" end
+        if humanoid then return "EXPOSED: local model and Humanoid (server effect unverified)" end
+        return "PARTIAL: owned custom rig; no Humanoid exposed (server effect unverified)"
+    end
+    local function snapshot()
+        local rows={}
+        local function line(text)
+            rows[#rows+1]=text
+        end
+        line("SPECTRA COMPATIBILITY / v"..VERSION.." / "..os.date("%Y-%m-%d %H:%M:%S"))
+        line("Mode: READ-ONLY Roblox-exposed data. No memory, hooks or private controllers.")
+        line("Game PlaceId: "..tostring(readable(function() return game.PlaceId end,"unknown")))
+        line("Player instances: "..tostring(readable(function() return #Players:GetPlayers() end,0)))
+        line("")
+        line("[LOCAL CHARACTER]")
+        local direct=readable(function() return LocalPlayer.Character end,nil)
+        line("Player.Character assigned: "..bool(direct~=nil))
+        local camera=readable(function() return Workspace.CurrentCamera end,nil)
+        local subject=camera and readable(function() return camera.CameraSubject end,nil) or nil
+        local subjectType=subject and readable(function() return subject.ClassName end,"unknown") or "nil"
+        line("CameraSubject class: "..subjectType)
+        local candidate=nil
+        local candidateSource="none"
+        if direct and direct:IsA("Model") then
+            candidate=direct
+            candidateSource="LocalPlayer.Character"
+        end
+        if not candidate and subject then
+            local ancestor=readable(function()
+                return subject:IsA("Model") and subject or subject:FindFirstAncestorWhichIsA("Model")
+            end,nil)
+            if ancestor and readable(function() return identifyPlayer(ancestor)==LocalPlayer end,false) then
+                candidate=ancestor
+                candidateSource="verified CameraSubject ancestor"
+            end
+        end
+
+        -- Bounded read of replicated models, avoiding scanning the entire
+        -- Workspace or assuming a nearby anonymous rig is the local player.
+        local nodeCount,modelCount,ownedCount,anonymousCount=0,0,0,0
+        local folder=Workspace:FindFirstChild("Players")
+        line("Workspace.Players folder: "..bool(folder~=nil))
+        if folder then
+            local queue={{folder,0}}
+            local at=1
+            while at<=#queue and nodeCount<400 do
+                local item=queue[at]
+                at+=1
+                for _,child in ipairs(item[1]:GetChildren()) do
+                    nodeCount+=1
+                    if nodeCount>400 then break end
+                    if child:IsA("Model") then
+                        modelCount+=1
+                        local owner=readable(function() return identifyPlayer(child) end,nil)
+                        if owner==LocalPlayer then
+                            ownedCount+=1
+                            if not candidate then
+                                candidate=child
+                                candidateSource="verified Workspace.Players model"
+                            end
+                        elseif not owner then
+                            anonymousCount+=1
+                        end
+                        if item[2]<2 then queue[#queue+1]={child,item[2]+1} end
+                    elseif child:IsA("Folder") and item[2]<3 then
+                        queue[#queue+1]={child,item[2]+1}
+                    end
+                end
+            end
+        end
+        line(string.format("Replicated model search: %d visited / %d models / %d owned / %d anonymous",
+            nodeCount,modelCount,ownedCount,anonymousCount))
+        if not candidate then
+            local localNamed=Workspace:FindFirstChild(LocalPlayer.Name)
+            if localNamed and localNamed:IsA("Model")
+                and readable(function() return identifyPlayer(localNamed)==LocalPlayer end,false) then
+                candidate=localNamed
+                candidateSource="verified Workspace name model"
+            end
+        end
+        if candidate and not readable(function() return candidate.Parent~=nil end,false) then candidate=nil end
+        local root=candidate and readable(function() return getRoot(candidate) end,nil) or nil
+        local hum=candidate and readable(function() return candidate:FindFirstChildWhichIsA("Humanoid",true) end,nil) or nil
+        line("Self-model source: "..candidateSource)
+        line("Self-model class: "..(candidate and candidate.ClassName or "none"))
+        line("Root: "..(root and root.Name or "none"))
+        line("Humanoid: "..bool(hum~=nil))
+        if root then
+            line("Root anchored: "..bool(readable(function() return root.Anchored end,false)))
+            line("Root collision enabled: "..bool(readable(function() return root.CanCollide end,false)))
+            local vel=readable(function() return root.AssemblyLinearVelocity end,nil)
+            if vel then
+                line(string.format("Root velocity: %.1f horizontal / %.1f vertical studs/s",
+                    Vector3.new(vel.X,0,vel.Z).Magnitude,vel.Y))
+            end
+        end
+        if hum then
+            line("Humanoid WalkSpeed: "..tostring(readable(function() return hum.WalkSpeed end,"unknown")))
+            line("Humanoid JumpPower: "..tostring(readable(function() return hum.JumpPower end,"unknown")))
+            line("Humanoid FloorMaterial: "..readEnum(readable(function() return hum.FloorMaterial end,nil)))
+        end
+        local status=category(candidate,root,hum)
+        line("Movement API: "..status)
+        line("")
+        line("[CAMERA & INPUT]")
+        line("CurrentCamera exists: "..bool(camera~=nil))
+        if camera then
+            line("CameraType: "..readEnum(readable(function() return camera.CameraType end,nil)))
+            local size=readable(function() return camera.ViewportSize end,nil)
+            if size then line(string.format("Viewport: %.0f x %.0f",size.X,size.Y)) end
+            line("Camera CFrame readable: "..bool(readable(function() return camera.CFrame end,nil)~=nil))
+        end
+        line("MouseBehavior: "..readEnum(readable(function() return UserInputService.MouseBehavior end,nil)))
+        line("Text input focused: "..bool(readable(function() return UserInputService:GetFocusedTextBox()~=nil end,false)))
+        line("Left-click polling API: "..bool(readable(function()
+            return type(UserInputService.IsMouseButtonPressed)=="function"
+        end,false)))
+        line("JumpRequest event: "..bool(readable(function() return UserInputService.JumpRequest~=nil end,false)))
+        line("")
+        line("[FEATURE CAPABILITY / EVIDENCE ONLY]")
+        if not root or not candidate then
+            line("Speed / Fly / Noclip / Jump / Teleport / Spin: UNAVAILABLE; no verified writable self-rig")
+        elseif root.Anchored then
+            line("Speed / Fly / Noclip / Jump / Teleport / Spin: RESTRICTED; root anchored")
+        else
+            line("Movement modifiers: local BasePart exists; server-accepted effect NOT VERIFIED")
+            line("Humanoid movement controls: "..(hum and "exposed" or "NOT EXPOSED"))
+        end
+        line("No Fall Damage: server authority not available from public client API")
+        line("No Recoil: only camera visual correction; weapon recoil/spread NOT VERIFIED")
+        line("Aimbot: visible target data does not establish camera or weapon aim control")
+        line("Anti Aim: client visual rotation does not establish server hitbox behavior")
+        line("")
+        line("NOTE: These observations cannot establish effective cheats or access to private game state.")
+        compat.text=table.concat(rows,"\n")
+        compat.lastTime=os.date("%H:%M:%S")
+        compat.status=status
+        if compat.view and compat.view.Parent then compat.view.Text=compat.text end
+        return compat.text
+    end
+    local function emit()
+        local report=snapshot()
+        print("[SPECTRA COMPAT] BEGIN")
+        for entry in report:gmatch("[^\n]+") do
+            print("[SPECTRA COMPAT] "..entry)
+        end
+        print("[SPECTRA COMPAT] END")
+        return report
+    end
+    local function copy()
+        local report=snapshot()
+        if type(setclipboard)=="function" then
+            local ok=pcall(setclipboard,report)
+            if ok then
+                log("INFO","Read-only compatibility report copied")
+                return
+            end
+        end
+        emit()
+        log("WARN","Clipboard unavailable; compatibility report printed to Roblox console")
+    end
+    compat.snapshot=snapshot
+    compat.emit=emit
+    compat.copy=copy
+    return compat
+end)()
+
 -- CAMERA & INPUT DIAGNOSTICS ----------------------------------------------
 -- Read-only observations. These measurements cannot tell us what direction
 -- Phantom Forces uses for server-validated shots or prove source-code behavior.
@@ -2297,7 +2486,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.7",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2321,7 +2510,7 @@ local function launchSpectraUI()
     statusText.Position=UDim2.fromOffset(17,4);statusText.Size=UDim2.new(1,-34,1,-8)
     local pages={}
     local tabButtons={}
-    for index,name in ipairs({"Aimbot","ESP","Modifiers","Settings","Debug"}) do
+    for index,name in ipairs({"Aimbot","ESP","Modifiers","Compat","Settings","Debug"}) do
         local b=create("TextButton",{
             Text=name,TextSize=12,Font=Enum.Font.GothamMedium,
             TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,
@@ -2576,6 +2765,27 @@ local function launchSpectraUI()
         window.Position = UDim2.fromOffset(math.floor(x+0.5),math.floor(y+0.5))
     end
 
+    -- A read-only snapshot of what Roblox actually exposes in this session.
+    local compatPage=pages.Compat
+    header(compatPage,"Compatibility inspector","Roblox-exposed interfaces only; no memory or private hooks")
+    groupLabel(compatPage,"LIVE SESSION SNAPSHOT")
+    action(compatPage,"Refresh and print to Roblox logs",function()
+        Compat.emit()
+        log("INFO","Compatibility snapshot printed with [SPECTRA COMPAT] prefix")
+    end)
+    action(compatPage,"Copy compatibility report",Compat.copy)
+    row(compatPage,"How to use","Press Refresh after spawning or toggling a modifier")
+    local compatReportView=create("TextBox",{
+        Text=Compat.text,TextEditable=false,MultiLine=true,ClearTextOnFocus=false,
+        Font=Enum.Font.Code,TextSize=10,TextWrapped=true,
+        TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,
+        TextYAlignment=Enum.TextYAlignment.Top,
+        BackgroundColor3=C.panel,BorderSizePixel=0,
+        Size=UDim2.new(1,-3,0,850),
+    },compatPage)
+    round(compatReportView,6)
+    Compat.view=compatReportView
+
     local settingsPage=pages.Settings
     header(settingsPage,"Settings","Interface preferences and runtime controls")
     groupLabel(settingsPage,"APPEARANCE")
@@ -2656,7 +2866,7 @@ local function launchSpectraUI()
         Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
         TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
     local inputRow=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
-    local cmd=create("TextBox",{PlaceholderText="status, inputdiag, probe, aimstatus, help, unload",Text="",ClearTextOnFocus=false,
+    local cmd=create("TextBox",{PlaceholderText="compat, copycompat, modstatus, help, unload",Text="",ClearTextOnFocus=false,
         TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,
         PlaceholderColor3=C.muted,BackgroundColor3=C.panel,Size=UDim2.new(1,-76,1,0),BorderSizePixel=0},inputRow)
     round(cmd,5);create("UIPadding",{PaddingLeft=UDim.new(0,9)},cmd)
@@ -2665,9 +2875,16 @@ local function launchSpectraUI()
     round(run,5)
     local function runCommand(raw)
         local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-        if input=="help" then log("INFO","Commands: help, status, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+        if input=="help" then log("INFO","Commands: help, status, compat, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
         elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
             log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
+        elseif input=="compat" then
+            safeCall("Compatibility snapshot",function()
+                Compat.emit()
+                log("INFO","Read-only compatibility report printed to Roblox logs")
+            end)
+        elseif input=="copycompat" then
+            safeCall("Copy compatibility",Compat.copy)
         elseif input=="inputdiag" then
             for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
         elseif input=="copyinput" then copyInputDiagnostics()
@@ -2873,11 +3090,12 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.9.7 loaded. Modifier cleanup, compatibility status and control fixes | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.10.0 loaded. Read-only compatibility inspector | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
-    safeCall("Initial movement compatibility",function()
-        log("INFO","Movement compatibility: "..Movement.probe())
+    safeCall("Initial compatibility snapshot",function()
+        Compat.emit()
+        log("INFO","Read-only compatibility snapshot written to console; open Compat tab or run compat")
     end)
     safeCall("Initial scan",discoverTargets)
     log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
