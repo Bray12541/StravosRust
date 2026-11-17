@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.16.1
+    SPECTRA / PHASE 1                         v1.17.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.16.1"
+local VERSION = "1.17.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -82,7 +82,7 @@ local state = {
     aimStyle = "Snap",
     aimSnapStrength = 100,
     aimVisibleOnly = false,
-    aimHoldRmb = false,
+    aimKey = "Right Mouse",
     aimSticky = true,
     aimPoint = "Head",
     aimMethod = "Auto",
@@ -1077,6 +1077,7 @@ end
 local AIM_RENDER_BIND = "SPECTRA_Aim_" .. tostring(LocalPlayer.UserId)
 local aimMouseMove = type(mousemoverel)=="function" and mousemoverel or nil
 local aimRmbHeld = false
+local aimKeyHeld={["Left Alt"]=false,["X"]=false}
 local aimStatus = "Disabled"
 local aimSelected = nil
 local aimSelectionCount = 0
@@ -1103,12 +1104,12 @@ local aimLastRetained = false
 -- Aim gate diagnostics survive menu opening, unlike the live aimStatus.
 local aimGateCounts = {
     disabled=0, menu=0, picker=0, noCamera=0, textFocus=0,
-    rightMouse=0, noTarget=0, tracking=0, renderErrors=0
+    activation=0, noTarget=0, tracking=0, renderErrors=0
 }
 local aimLastGameplayStatus = "No test with the menu hidden yet"
 local aimLastGameplayTime = "never"
 local aimTargetProbe = {enemies=0,onScreen=0,insideFov=0,eligible=0,blocked=0}
-local aimLastRmbDetected = false
+local aimLastActivationDetected = false
 local function recordAimGate(reason, status, gameplay)
     aimGateCounts[reason]=(aimGateCounts[reason] or 0)+1
     aimStatus=status
@@ -1217,6 +1218,34 @@ local function getAimPosition(target)
     return cf.Position
 end
 
+local function getAimPositions(target)
+    if state.aimPoint~="Nearest" then
+        local p=getAimPosition(target)
+        return p and {p} or {}
+    end
+    -- Use the nearest actual body part on-screen, not a generic box center.
+    -- Bounding-box center remains a fallback for custom rigs.
+    local points,seen={},{}
+    local names={
+        "Head","UpperTorso","Torso","Chest","Body","HumanoidRootPart",
+        "LeftUpperArm","RightUpperArm","LeftHand","RightHand",
+        "LeftUpperLeg","RightUpperLeg","LeftFoot","RightFoot"
+    }
+    local model=target.model
+    for _,name in ipairs(names) do
+        local part=model:FindFirstChild(name,true)
+        if part and part:IsA("BasePart") and not seen[part] then
+            points[#points+1]=part.Position
+            seen[part]=true
+        end
+    end
+    if #points==0 then
+        local point=getAimPosition(target)
+        if point then points[1]=point end
+    end
+    return points
+end
+
 local function aimHasLineOfSight(camera,target,position)
     -- With the line-of-sight requirement disabled, target selection may
     -- follow replicated enemy models behind map geometry. This changes
@@ -1260,34 +1289,43 @@ local function chooseAimTarget(camera)
                 and playerRelation~="ally" and groupRelation~="ally"
             if enemy and (root.Position-camera.CFrame.Position).Magnitude <= MAX_DISTANCE then
                 aimTargetProbe.enemies+=1
-                local point=getAimPosition(t)
-                if point then
-                    local v,onScreen=camera:WorldToViewportPoint(point)
-                    if onScreen and v.Z>0.5 then
-                        aimTargetProbe.onScreen+=1
-                        local delta=Vector2.new(v.X,v.Y)-center
-                        local d=delta.Magnitude
-                        local locked=state.aimSticky and aimSelected
-                            and aimSelected.model==model
-                        -- Hard FOV boundary applies to sticky targets too.
-                        local allowed=state.aimFovRadius
-                        if d<=allowed then
-                            aimTargetProbe.insideFov+=1
+                local onScreenAny,inFovAny,blockedAny=false,false,false
+                local nearestPoint,nearestDelta,nearestDistance=nil,nil,math.huge
+                for _,point in ipairs(getAimPositions(t)) do
+                    local projected,onScreen=camera:WorldToViewportPoint(point)
+                    if onScreen and projected.Z>0.5 then
+                        onScreenAny=true
+                        local delta=Vector2.new(projected.X,projected.Y)-center
+                        local distance=delta.Magnitude
+                        -- Every body part uses the same strict FOV boundary.
+                        if distance<=state.aimFovRadius then
+                            inFovAny=true
                             if aimHasLineOfSight(camera,t,point) then
-                                aimTargetProbe.eligible+=1
-                                aimSelectionCount+=1
-                                -- Prefer the current target slightly to
-                                -- prevent jitter between nearby enemies.
-                                local bonus=locked and math.min(24,state.aimFovRadius*0.15) or 0
-                                local score=d-bonus
-                                if score<bestScore then
-                                    best,bestPoint,bestDelta,bestScore=t,point,delta,score
+                                if distance<nearestDistance then
+                                    nearestPoint=point
+                                    nearestDelta=delta
+                                    nearestDistance=distance
                                 end
                             else
-                                aimTargetProbe.blocked+=1
+                                blockedAny=true
                             end
                         end
                     end
+                end
+                if onScreenAny then aimTargetProbe.onScreen+=1 end
+                if inFovAny then aimTargetProbe.insideFov+=1 end
+                if nearestPoint then
+                    aimTargetProbe.eligible+=1
+                    aimSelectionCount+=1
+                    local locked=state.aimSticky and aimSelected
+                        and aimSelected.model==model
+                    local bonus=locked and math.min(24,state.aimFovRadius*0.15) or 0
+                    local score=nearestDistance-bonus
+                    if score<bestScore then
+                        best,bestPoint,bestDelta,bestScore=t,nearestPoint,nearestDelta,score
+                    end
+                elseif blockedAny then
+                    aimTargetProbe.blocked+=1
                 end
             end
         end
@@ -1305,6 +1343,27 @@ local function updateAimVisual(camera)
         aimFovFrame.Size=UDim2.fromOffset(radius*2,radius*2)
         aimFovFrame.Position=UDim2.fromOffset(viewport.X/2-radius,viewport.Y/2-radius)
     end
+end
+
+local function aimActivationHeld()
+    local key=state.aimKey
+    if key=="Always" then return true end
+    if key=="Right Mouse" then
+        local held=aimRmbHeld
+        local ok,pressed=pcall(function()
+            return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        end)
+        if ok then held=pressed end
+        return held
+    end
+    local code=key=="Left Alt" and Enum.KeyCode.LeftAlt
+        or key=="X" and Enum.KeyCode.X or nil
+    if not code then return false end
+    local ok,pressed=pcall(function()
+        return UserInputService:IsKeyDown(code)
+    end)
+    if ok then return pressed end
+    return aimKeyHeld[key]==true
 end
 
 local function runAimbot(dt)
@@ -1336,15 +1395,11 @@ local function runAimbot(dt)
         aimSelected=nil
         return
     end
-    -- Polling remains reliable when the game consumes MouseButton2 events.
-    local rightHeld=aimRmbHeld
-    local inputOK,pressed=pcall(function()
-        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-    end)
-    if inputOK then rightHeld=pressed end
-    aimLastRmbDetected=rightHeld
-    if state.aimHoldRmb and not rightHeld then
-        recordAimGate("rightMouse","Hold right mouse button",true)
+    -- The activation key may be RMB, a keyboard key, or Always.
+    local active=aimActivationHeld()
+    aimLastActivationDetected=active
+    if not active then
+        recordAimGate("activation","Hold Aim Key: "..state.aimKey,true)
         aimSelected=nil
         return
     end
@@ -2461,8 +2516,8 @@ local function updateInputDiagnostics(dt)
 end
 
 local function getAimGateDiagnostics()
-    return string.format("Aim gates: tracking=%d | RMB=%d | no target=%d | menu=%d | focused=%d | errors=%d",
-        aimGateCounts.tracking,aimGateCounts.rightMouse,aimGateCounts.noTarget,
+    return string.format("Aim gates: tracking=%d | activation=%d | no target=%d | menu=%d | focused=%d | errors=%d",
+        aimGateCounts.tracking,aimGateCounts.activation,aimGateCounts.noTarget,
         aimGateCounts.menu,aimGateCounts.textFocus,aimGateCounts.renderErrors)
 end
 
@@ -2487,8 +2542,8 @@ local function getInputDiagnosticsLines()
         "Aimbot: "..(state.aimEnabled and "enabled" or "disabled")
             .." | backend: "..aimBackend.." | status: "..aimStatus,
         "Last GAMEPLAY status: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
-        "Hold-RMB setting: "..(state.aimHoldRmb and "ON" or "OFF")
-            .." | detected RMB: "..tostring(aimLastRmbDetected),
+        "Aim Key: "..state.aimKey
+            .." | last activation detected: "..tostring(aimLastActivationDetected),
         getAimGateDiagnostics(),
         string.format("Target checks: %d enemies | %d projected on screen | %d in FOV | %d eligible | %d blocked (LOS requirement %s)",
             aimTargetProbe.enemies,aimTargetProbe.onScreen,
@@ -2639,11 +2694,11 @@ local function report()
         "Aim method: "..state.aimMethod.." | backend: "..aimBackend,
         "Aim FOV: "..state.aimFovRadius.." px | style: "..state.aimStyle
             .." | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
-        "Aim activation: "..(state.aimHoldRmb and "Hold RMB" or "Always when enabled"),
+        "Aim activation: "..state.aimKey,
         "Aim requires line of sight: "..tostring(state.aimVisibleOnly)
             .." | eligible candidates: "..aimSelectionCount,
         "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
-        "Aim RMB setting: "..tostring(state.aimHoldRmb).." | "..getAimGateDiagnostics(),
+        "Aim Key setting: "..state.aimKey.." | "..getAimGateDiagnostics(),
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
         "Relative mouse writes: "..aimMetrics.mouseWrites
             .." | mouse API failures: "..aimMetrics.mouseErrors
@@ -2739,7 +2794,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.16.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.17.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2900,22 +2955,32 @@ local function launchSpectraUI()
     header(aimPage,"Aimbot","Snap toward projected enemy targets inside the FOV circle")
     groupLabel(aimPage,"TARGETING")
     toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
-    toggle(aimPage,"Hold right mouse","Optional: require RMB; off = automatic while enabled","aimHoldRmb")
-    toggle(aimPage,"Require clear line of sight","Off by default: continue tracking behind cover","aimVisibleOnly")
+    local aimKeyButton
+    aimKeyButton=action(aimPage,"Aim Key: Right Mouse",function()
+        local options={"Right Mouse","Left Alt","X","Always"}
+        local nextIndex=1
+        for i,v in ipairs(options) do
+            if state.aimKey==v then nextIndex=i%#options+1;break end
+        end
+        state.aimKey=options[nextIndex]
+        aimKeyButton.Text="Aim Key: "..state.aimKey
+        log("INFO","Aimbot activation key: "..state.aimKey)
+    end)
+    toggle(aimPage,"Visibility Check","Require clear line of sight (off = track behind cover)","aimVisibleOnly")
     toggle(aimPage,"Sticky targets","Prefer the previous enemy to reduce rapid target switching","aimSticky")
     local aimPointButton
-    aimPointButton=action(aimPage,"Aim point: Head",function()
-        local order={"Head","Chest","Center"}
+    aimPointButton=action(aimPage,"Target Bone: Head",function()
+        local order={"Head","Chest","Nearest"}
         local nextIndex=1
         for i,value in ipairs(order) do
             if state.aimPoint==value then nextIndex=i%#order+1; break end
         end
         state.aimPoint=order[nextIndex]
-        aimPointButton.Text="Aim point: "..state.aimPoint
-        log("INFO","Aimbot aim point: "..state.aimPoint)
+        aimPointButton.Text="Target Bone: "..state.aimPoint
+        log("INFO","Aimbot target bone: "..state.aimPoint)
     end)
     groupLabel(aimPage,"CONTROL")
-    settingSlider(aimPage,"FOV radius","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
+    settingSlider(aimPage,"Aim FOV","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
     local aimStyleButton
     aimStyleButton=action(aimPage,"Aim style: Snap",function()
         state.aimStyle=state.aimStyle=="Snap" and "Smooth" or "Snap"
@@ -2923,7 +2988,7 @@ local function launchSpectraUI()
         log("INFO","Aimbot style: "..state.aimStyle)
     end)
     settingSlider(aimPage,"Snap strength","Fast mouse correction; tune to in-game sensitivity","aimSnapStrength",40,200,10,"%")
-    settingSlider(aimPage,"Smoothing","Only affects Smooth mode (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
+    settingSlider(aimPage,"Smoothness","Only affects Smooth style (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
     toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
     local aimMethodButton
     aimMethodButton=action(aimPage,"Aim method: Auto",function()
@@ -2951,6 +3016,9 @@ local function launchSpectraUI()
             .." | target models: "..#targets.." | "..lastScanDetails)
         print("[SPECTRA AIM] Team calibration: "..calibrationMode
             .." | "..calibrationMessage)
+        print("[SPECTRA AIM] Aim Key: "..state.aimKey
+            .." | Target Bone: "..state.aimPoint
+            .." | Visibility Check: "..tostring(state.aimVisibleOnly))
         for _,entry in ipairs(getInputDiagnosticsLines()) do
             if entry:find("Aimbot",1,true)
                 or entry:find("Aim ",1,true)
@@ -2958,7 +3026,7 @@ local function launchSpectraUI()
                 or entry:find("Target checks",1,true)
                 or entry:find("Last GAMEPLAY",1,true)
                 or entry:find("CameraType:",1,true)
-                or entry:find("Hold-RMB",1,true)
+                or entry:find("Aim Key:",1,true)
                 or entry:find("Target switches",1,true)
                 or entry:find("Aim style:",1,true)
                 or entry:find("Snap frames:",1,true)
@@ -3190,11 +3258,11 @@ local function launchSpectraUI()
                 local t=targets[i]
                 log("INFO",string.format("%d) %s [%s, %s]",i,t.player and t.player.Name or "calibrated enemy rig",t.source,t.player and "verified" or "group-only"))
             end
-        elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
+        elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; activation: "..state.aimKey)
         elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
         elseif input=="aimstatus" then
             log("INFO","Aim: "..aimStatus.." | gameplay="..aimLastGameplayStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrides="..aimOverrideSamples.." | corrections="..aimCorrectionCount)
-            log("INFO",getAimGateDiagnostics().." | holdRMB="..tostring(state.aimHoldRmb))
+            log("INFO",getAimGateDiagnostics().." | aimKey="..state.aimKey)
         elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
         elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
         elseif input=="clear" then table.clear(logs);logBox.Text=""
@@ -3233,10 +3301,16 @@ local function launchSpectraUI()
     connect(UserInputService.InputEnded,function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
         if input.UserInputType==Enum.UserInputType.MouseButton2 then aimRmbHeld=false end
+        if input.KeyCode==Enum.KeyCode.LeftAlt then aimKeyHeld["Left Alt"]=false end
+        if input.KeyCode==Enum.KeyCode.X then aimKeyHeld["X"]=false end
     end)
     connect(UserInputService.InputBegan,function(input,gameProcessed)
         if input.UserInputType==Enum.UserInputType.MouseButton2 then
             aimRmbHeld=not (window and window.Visible) and not UserInputService:GetFocusedTextBox()
+        end
+        if not gameProcessed and not UserInputService:GetFocusedTextBox() then
+            if input.KeyCode==Enum.KeyCode.LeftAlt then aimKeyHeld["Left Alt"]=true end
+            if input.KeyCode==Enum.KeyCode.X then aimKeyHeld["X"]=true end
         end
         if gameProcessed or UserInputService:GetFocusedTextBox() then return end
         if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
@@ -3362,7 +3436,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.16.1 loaded. Snap targeting tracks projected enemies behind cover; LOS remains optional")
+    log("INFO","SPECTRA Phase 1 v1.17.0 loaded. Selectable Aim Key, Head/Chest/Nearest bones, FOV, smoothness and visibility settings")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
