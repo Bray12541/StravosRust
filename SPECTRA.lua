@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.13.0
+    SPECTRA / PHASE 1                         v1.13.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.13.0"
+local VERSION = "1.13.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1811,7 +1811,7 @@ local Movement = (function()
                 or SelfCalibration.isCurrent(movement.model)) then
             return movement.model,movement.root,movement.humanoid
         end
-        -- Reconfirmation of a new life must bypass the normal 0.8s
+        -- Auto-calibration of a new life must bypass the normal 0.8s
         -- polling throttle so speed/fly don't wait for an old character scan.
         local newlyConfirmed=SelfCalibration.active
             and SelfCalibration.active.model~=movement.model
@@ -1827,7 +1827,7 @@ local Movement = (function()
         if subject then
             local ancestor=subject:IsA("Model") and subject or subject:FindFirstAncestorWhichIsA("Model")
             if setMovementRig(ancestor,SelfCalibration.isCurrent(ancestor)
-                and "manual session camera-rig confirmation" or "identified CameraSubject") then
+                and "automatic movement-match" or "identified CameraSubject") then
                 return movement.model,movement.root,movement.humanoid
             end
         end
@@ -2231,7 +2231,7 @@ local Compat=(function()
         local c=compat.observation
         if not c then
             -- Resume evidence collection on an actual moving new Humanoid,
-            -- but never silently confirm a new or spectated model.
+            -- but only auto-calibrate after stable input and camera/model checks.
             if SelfCalibration.readyForRearm() and observationKeyDown() then
                 startObservation(SelfCalibration.initialCaptureArmed and "initial" or "redeploy")
             end
@@ -2438,7 +2438,7 @@ local Compat=(function()
         end
         if not candidate and subjectModel and SelfCalibration.isCurrent(subjectModel) then
             candidate=subjectModel
-            candidateSource="manual session camera confirmation; ownership UNVERIFIED"
+            candidateSource="automatic movement-match; ownership UNVERIFIED"
         end
 
         -- Bounded read of replicated models, avoiding scanning the entire
@@ -2904,7 +2904,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.13.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.13.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3544,7 +3544,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.13.0 loaded. Auto calibration after movement correlation, Noclip removed, speed capped 50")
+    log("INFO","SPECTRA Phase 1 v1.13.1 loaded. Auto calibration after movement correlation; speed capped at 50")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
