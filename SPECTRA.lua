@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.4
+    SPECTRA / PHASE 1                         v1.7.5
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.4"
+local VERSION = "1.7.5"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1287,6 +1287,111 @@ local function runAimbot(dt)
     aimStatus="Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")"
 end
 
+-- CAMERA & INPUT DIAGNOSTICS ----------------------------------------------
+-- Read-only observations. These measurements cannot tell us what direction
+-- Phantom Forces uses for server-validated shots or prove source-code behavior.
+local inputDiag = {
+    seconds=0, mouseEvents=0, mousePixels=0, rotationDegrees=0,
+    lastMouseEvents=0, lastMousePixels=0, lastRotationDegrees=0,
+    lastWindowSeconds=0, totalMouseEvents=0, totalMousePixels=0,
+    totalCameraDegrees=0, windowCount=0, camera=nil, lastLook=nil
+}
+local inputDiagLiveText = nil
+
+local function resetInputDiagnostics()
+    inputDiag.seconds=0
+    inputDiag.mouseEvents=0
+    inputDiag.mousePixels=0
+    inputDiag.rotationDegrees=0
+    inputDiag.lastMouseEvents=0
+    inputDiag.lastMousePixels=0
+    inputDiag.lastRotationDegrees=0
+    inputDiag.lastWindowSeconds=0
+    inputDiag.totalMouseEvents=0
+    inputDiag.totalMousePixels=0
+    inputDiag.totalCameraDegrees=0
+    inputDiag.windowCount=0
+    inputDiag.camera=nil
+    inputDiag.lastLook=nil
+end
+
+local function updateInputDiagnostics(dt)
+    local camera=Workspace.CurrentCamera
+    if camera~=inputDiag.camera then
+        inputDiag.lastLook=nil
+        inputDiag.camera=camera
+    end
+    if camera then
+        local currentLook=camera.CFrame.LookVector
+        if inputDiag.lastLook then
+            local degrees=angleBetween(inputDiag.lastLook,currentLook)
+            if degrees==degrees and degrees<180 then
+                inputDiag.rotationDegrees+=degrees
+                inputDiag.totalCameraDegrees+=degrees
+            end
+        end
+        inputDiag.lastLook=currentLook
+    end
+    inputDiag.seconds+=dt
+    if inputDiag.seconds>=1 then
+        inputDiag.lastWindowSeconds=inputDiag.seconds
+        inputDiag.lastMouseEvents=inputDiag.mouseEvents
+        inputDiag.lastMousePixels=inputDiag.mousePixels
+        inputDiag.lastRotationDegrees=inputDiag.rotationDegrees
+        inputDiag.windowCount+=1
+        inputDiag.seconds=0
+        inputDiag.mouseEvents=0
+        inputDiag.mousePixels=0
+        inputDiag.rotationDegrees=0
+    end
+end
+
+local function getInputDiagnosticsLines()
+    local camera=Workspace.CurrentCamera
+    local cameraType=camera and camera.CameraType.Name or "(none)"
+    local mouseBehavior=UserInputService.MouseBehavior.Name
+    local rmb="unknown"
+    local ok,pressed=pcall(function()
+        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    end)
+    if ok then rmb=tostring(pressed) end
+    local window=math.max(0.01,inputDiag.lastWindowSeconds)
+    local ms=inputDiag.windowCount>0 and "last second" or "collecting"
+    local lines={
+        "-- CAMERA & INPUT DIAGNOSTICS (read-only) --",
+        "CameraType: "..cameraType.." | MouseBehavior: "..mouseBehavior.." | RMB: "..rmb,
+        string.format("Mouse (%s): %d events | %.1f px/s",
+            ms,inputDiag.lastMouseEvents,inputDiag.lastMousePixels/window),
+        string.format("Camera (%s): %.2f deg/s | total: %.1f deg",
+            ms,inputDiag.lastRotationDegrees/window,inputDiag.totalCameraDegrees),
+        "Aimbot: "..(state.aimEnabled and "enabled" or "disabled")
+            .." | backend: "..aimBackend.." | status: "..aimStatus,
+        string.format("Aim writes: %d | move samples: %d | override samples: %d",
+            aimUpdates,aimMovementSamples,aimOverrideSamples),
+        string.format("Last camera write: %.2f deg | last reset: %.2f deg",
+            aimLastMoveDegrees,aimLastResetDegrees),
+        "Mouse reports and camera writes do not prove weapon-aim control."
+    }
+    return lines
+end
+
+local function getInputDiagnosticsReport()
+    return table.concat(getInputDiagnosticsLines(),"\n")
+end
+
+local function copyInputDiagnostics()
+    local data=getInputDiagnosticsReport()
+    if type(setclipboard)=="function" then
+        local ok=pcall(setclipboard,data)
+        if ok then
+            log("INFO","Camera & Input Diagnostics copied to clipboard")
+            return
+        end
+    end
+    print(data)
+    log("WARN","Clipboard unavailable; input diagnostics printed to console")
+end
+
 -- Bounded source audit, run only when a report is requested.
 -- Does not track or render objects: it exposes why candidate models are excluded.
 local function inspectDataSources()
@@ -1404,6 +1509,8 @@ local function report()
         "No getgc, hooks, remote scripts, or writes to other character models.",
         "-- RECENT LOGS --"
     }
+    local inputLines=getInputDiagnosticsLines()
+    for _,entry in ipairs(inputLines) do rows[#rows+1]=entry end
     local sources = inspectDataSources()
     for _, entry in ipairs(sources) do rows[#rows+1] = entry end
     for i=math.max(1,#logs-28),#logs do rows[#rows+1]=logs[i] end
@@ -1465,7 +1572,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.4",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.5",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1733,6 +1840,34 @@ end
 debugButton("Run probe",0,function() discoverTargets();log("INFO","Probe: "..lastSource.." / "..lastScanDetails) end)
 debugButton("Copy report",0.335,exportReport)
 debugButton("Clear logs",0.67,function() table.clear(logs);if logBox then logBox.Text="" end end)
+groupLabel(debugPage,"CAMERA & INPUT DIAGNOSTICS")
+local inputDiagPanel=create("Frame",{
+    Size=UDim2.new(1,-3,0,165),BackgroundColor3=C.panel,BorderSizePixel=0
+},debugPage)
+round(inputDiagPanel,6)
+inputDiagLiveText=create("TextLabel",{
+    Position=UDim2.fromOffset(10,8),Size=UDim2.new(1,-20,1,-16),
+    BackgroundTransparency=1,Text="Collecting read-only input and camera samples...",
+    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,
+    TextXAlignment=Enum.TextXAlignment.Left,TextSize=10,Font=Enum.Font.Code,
+    TextColor3=C.white,BorderSizePixel=0
+},inputDiagPanel)
+local diagActions=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
+local function diagAction(title,x,callback)
+    local b=create("TextButton",{
+        Text=title,TextSize=11,Font=Enum.Font.GothamMedium,
+        TextColor3=C.white,BackgroundColor3=C.panel2,BorderSizePixel=0,
+        Position=UDim2.new(x,0,0,0),Size=UDim2.new(0.48,-2,1,0)
+    },diagActions)
+    round(b,5)
+    connect(b.MouseButton1Click,function() safeCall(title,callback) end)
+end
+diagAction("Copy input diagnostics",0,copyInputDiagnostics)
+diagAction("Reset input counters",0.52,function()
+    resetInputDiagnostics()
+    log("INFO","Camera & input counters reset")
+end)
+groupLabel(debugPage,"EVENT LOG")
 local logPanel=create("Frame",{Size=UDim2.new(1,-3,0,210),BackgroundColor3=C.panel,BorderSizePixel=0},debugPage)
 round(logPanel,6)
 local logScroll=create("ScrollingFrame",{Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-16,1,-16),BackgroundTransparency=1,
@@ -1741,7 +1876,7 @@ logBox=create("TextBox",{BackgroundTransparency=1,ClearTextOnFocus=false,MultiLi
     Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
     TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
 local inputRow=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
-local cmd=create("TextBox",{PlaceholderText="status, probe, targets, esp on/off, help, unload",Text="",ClearTextOnFocus=false,
+local cmd=create("TextBox",{PlaceholderText="status, inputdiag, probe, aimstatus, help, unload",Text="",ClearTextOnFocus=false,
     TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,
     PlaceholderColor3=C.muted,BackgroundColor3=C.panel,Size=UDim2.new(1,-76,1,0),BorderSizePixel=0},inputRow)
 round(cmd,5);create("UIPadding",{PaddingLeft=UDim.new(0,9)},cmd)
@@ -1750,9 +1885,13 @@ local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=1
 round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+    if input=="help" then log("INFO","Commands: help, status, inputdiag, copyinput, resetinput, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
     elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
         log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
+    elseif input=="inputdiag" then
+        for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
+    elseif input=="copyinput" then copyInputDiagnostics()
+    elseif input=="resetinput" then resetInputDiagnostics();log("INFO","Camera & input counters reset")
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
     elseif input=="sources" then
         local sourceLines=inspectDataSources()
@@ -1792,6 +1931,13 @@ connect(top.InputBegan,function(input)
     end
 end)
 connect(UserInputService.InputChanged,function(input)
+    if input.UserInputType==Enum.UserInputType.MouseMovement then
+        inputDiag.mouseEvents+=1
+        inputDiag.totalMouseEvents+=1
+        local pixels=input.Delta.Magnitude
+        inputDiag.mousePixels+=pixels
+        inputDiag.totalMousePixels+=pixels
+    end
     if dragging and input.UserInputType==Enum.UserInputType.MouseMovement then
         local d=input.Position-dragStart
         window.Position=UDim2.new(windowStart.X.Scale,windowStart.X.Offset+d.X,windowStart.Y.Scale,windowStart.Y.Offset+d.Y)
@@ -1824,6 +1970,7 @@ end)
 
 connect(RunService.RenderStepped,function(dt)
     if not alive then return end
+    updateInputDiagnostics(dt)
     stats.fps=stats.fps==0 and (1/math.max(0.001,dt)) or (stats.fps*0.92 + (1/math.max(0.001,dt))*0.08)
     scanAccumulator += dt
     renderAccumulator += dt
@@ -1849,6 +1996,9 @@ connect(RunService.RenderStepped,function(dt)
         clampWindow(false)
         if debugSummary and debugSummary.Parent then
             debugSummary.Text=string.format("%s\n%s   |   render target %d Hz",lastSource,lastScanDetails,UPDATE_HZ)
+        end
+        if inputDiagLiveText and inputDiagLiveText.Parent then
+            inputDiagLiveText.Text=getInputDiagnosticsReport()
         end
     end
 end)
@@ -1881,7 +2031,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.4 loaded. Posture-aware skeleton fallback | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.7.5 loaded. Read-only Camera & Input Diagnostics in Debug tab | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
