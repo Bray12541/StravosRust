@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.5
+    SPECTRA / PHASE 1                         v1.7.6
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.5"
+local VERSION = "1.7.6"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1090,9 +1090,75 @@ local aimLastResetDegrees = 0
 local aimOverrideStreak = 0
 local aimOverrideSamples = 0
 local aimLastRetained = false
+-- Experimental camera stabilization for Scriptable camera controllers.
+-- This listens for subsequent Camera.CFrame writes; it does not modify the
+-- game's camera module, mouse APIs, weapon logic or remote interfaces.
+local aimObservedCamera=nil
+local aimObservedCameraConnection=nil
+local aimCorrectionActive=false
+local aimCorrectionPoint=nil
+local aimCorrectionTarget=nil
+local aimCorrectionGuard=false
+local aimCorrectionsThisFrame=0
+local aimCorrectionCount=0
+local aimCorrectionErrors=0
+local aimCorrectionObservations=0
+local aimCorrectionAngle=0
 
 local function angleBetween(a,b)
     return math.deg(math.acos(math.clamp(a:Dot(b),-1,1)))
+end
+
+local function disableAimCorrection()
+    aimCorrectionActive=false
+    aimCorrectionPoint=nil
+    aimCorrectionTarget=nil
+end
+
+local function observeAimCamera(camera)
+    if aimObservedCamera==camera then return end
+    disableAimCorrection()
+    if aimObservedCameraConnection then
+        aimObservedCameraConnection:Disconnect()
+        aimObservedCameraConnection=nil
+    end
+    aimObservedCamera=camera
+    if not camera then return end
+    aimObservedCameraConnection=connect(camera:GetPropertyChangedSignal("CFrame"),function()
+        if not alive or not aimCorrectionActive or aimCorrectionGuard
+            or not state.aimEnabled or (window and window.Visible)
+            or pickerActive or UserInputService:GetFocusedTextBox() then return end
+        if camera~=Workspace.CurrentCamera or not aimCorrectionPoint
+            or not aimCorrectionTarget or not aimCorrectionTarget.Parent then return end
+        if aimCorrectionsThisFrame>=2 then return end
+        local before=camera.CFrame
+        local targetVector=aimCorrectionPoint-before.Position
+        if targetVector.Magnitude<0.5 then return end
+        local targetDirection=targetVector.Unit
+        local remaining=angleBetween(before.LookVector,targetDirection)
+        aimCorrectionAngle=remaining
+        if remaining<0.15 or remaining>45 then return end
+        aimCorrectionObservations+=1
+        -- Bounded reapplication only when another writer has changed CFrame.
+        -- Guard and 2-corrections-per-frame cap prevent a recursive event storm.
+        local alpha=math.clamp(0.55/math.sqrt(math.max(1,state.aimSmoothing)),0.15,0.55)
+        local desired=CFrame.lookAt(before.Position,aimCorrectionPoint)
+        aimCorrectionGuard=true
+        aimCorrectionsThisFrame+=1
+        local ok,err=pcall(function()
+            camera.CFrame=before:Lerp(desired,alpha)
+        end)
+        aimCorrectionGuard=false
+        if ok then
+            aimCorrectionCount+=1
+        else
+            aimCorrectionErrors+=1
+            if aimCorrectionErrors<=3 then
+                log("ERROR","Camera correction failed: "..tostring(err))
+            end
+            disableAimCorrection()
+        end
+    end)
 end
 
 local function getAimPosition(target)
@@ -1184,6 +1250,8 @@ local function updateAimVisual(camera)
 end
 
 local function runAimbot(dt)
+    aimCorrectionsThisFrame=0
+    disableAimCorrection()
     if not alive or not state.aimEnabled then
         aimStatus="Disabled"
         aimSelected=nil
@@ -1214,10 +1282,13 @@ local function runAimbot(dt)
         return
     end
     aimSelected=target
-    -- Auto prioritizes camera rotation. Merely having mousemoverel() doesn't
-    -- mean the game's custom input/camera accepts synthesized mouse movement.
+    -- Scriptable FPS cameras frequently overwrite generic CFrame writes.
+    -- Auto uses bounded event-driven stabilization on Scriptable cameras.
+    -- Direct Camera and Mouse methods remain available for comparison.
     local requested=state.aimMethod
-    local method=requested=="Auto" and "Camera" or requested
+    local method=requested=="Auto"
+        and (camera.CameraType==Enum.CameraType.Scriptable and "Stabilized" or "Camera")
+        or requested
     if method=="Mouse" then
         if not aimMouseMove then
             aimStatus="Mouse aiming unavailable in executor"
@@ -1272,7 +1343,15 @@ local function runAimbot(dt)
         if aimLastMoveDegrees>0.01 then aimCameraMoved+=1 end
         aimLastWrittenCamera=after
         aimLastTargetModel=target.model
-        aimBackend="Camera"
+        aimBackend=method=="Stabilized" and "Camera stabilization (experimental)" or "Camera"
+        if method=="Stabilized" then
+            -- Observe only the current camera and only while an enemy target is
+            -- actively selected. Nothing persists when the UI is opened.
+            observeAimCamera(camera)
+            aimCorrectionPoint=point
+            aimCorrectionTarget=target.model
+            aimCorrectionActive=true
+        end
         if aimOverrideStreak>=12 then
             aimLastActiveStatus=string.format(
                 "Game appears to override camera: %.2f deg lost last frame (%d consecutive frames)",
@@ -1370,6 +1449,9 @@ local function getInputDiagnosticsLines()
             aimUpdates,aimMovementSamples,aimOverrideSamples),
         string.format("Last camera write: %.2f deg | last reset: %.2f deg",
             aimLastMoveDegrees,aimLastResetDegrees),
+        string.format("Camera stabilization: %s | corrections: %d | conflicts: %d | errors: %d",
+            aimCorrectionActive and "active" or "inactive",
+            aimCorrectionCount,aimCorrectionObservations,aimCorrectionErrors),
         "Mouse reports and camera writes do not prove weapon-aim control."
     }
     return lines
@@ -1503,6 +1585,9 @@ local function report()
         "Aim last reset delta: "..string.format("%.2f",aimLastResetDegrees)
             .." deg | override streak: "..aimOverrideStreak
             .." | override samples: "..aimOverrideSamples,
+        "Camera stabilization: "..(aimCorrectionActive and "active" or "inactive")
+            .." | corrective writes: "..aimCorrectionCount.." | observed conflicts: "..aimCorrectionObservations
+            .." | errors: "..aimCorrectionErrors,
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
         "Estimated 2D skeletons shown: "..tostring(stats.approxSkeletons).." (not actual bone poses)",
         "Low/wide fallback skeletons: "..tostring(stats.wideSkeletons).." (leg lines hidden)",
@@ -1533,6 +1618,12 @@ local function shutdown()
     alive=false
     pcall(function() RunService:UnbindFromRenderStep(AIM_RENDER_BIND) end)
     aimRmbHeld=false
+    disableAimCorrection()
+    if aimObservedCameraConnection then
+        pcall(function() aimObservedCameraConnection:Disconnect() end)
+        aimObservedCameraConnection=nil
+    end
+    aimObservedCamera=nil
     stopPicker(false)
     for key in pairs(widgets) do destroyWidget(key) end
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
@@ -1572,7 +1663,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.5",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.6",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1752,7 +1843,7 @@ settingSlider(aimPage,"Smoothing","1 = faster, 20 = more gradual","aimSmoothing"
 toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
 local aimMethodButton
 aimMethodButton=action(aimPage,"Aim method: Auto",function()
-    local modes={"Auto","Mouse","Camera"}
+    local modes={"Auto","Mouse","Camera","Stabilized"}
     local nextIndex=1
     for i,value in ipairs(modes) do
         if state.aimMethod==value then nextIndex=i%#modes+1; break end
@@ -1761,7 +1852,7 @@ aimMethodButton=action(aimPage,"Aim method: Auto",function()
     aimMethodButton.Text="Aim method: "..state.aimMethod
     log("INFO","Aimbot method: "..state.aimMethod)
 end)
-row(aimPage,"Runtime compatibility","Auto tries camera; Mouse is manual and may be ignored by the game")
+row(aimPage,"Runtime compatibility","Auto stabilizes Scriptable camera. Visual correction only; weapon unverified")
 groupLabel(aimPage,"STATUS")
 local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
 aimStatusText.Size=UDim2.new(1,-3,0,24)
@@ -1910,7 +2001,7 @@ local function runCommand(raw)
         end
     elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
     elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
-    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | lastActive="..aimLastActiveStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrideSamples="..aimOverrideSamples.." | overrideStreak="..aimOverrideStreak.." | lastResetDegrees="..string.format("%.2f",aimLastResetDegrees))
+    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | lastActive="..aimLastActiveStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrideSamples="..aimOverrideSamples.." | overrideStreak="..aimOverrideStreak.." | lastResetDegrees="..string.format("%.2f",aimLastResetDegrees).." | cameraCorrections="..aimCorrectionCount.." | cameraConflicts="..aimCorrectionObservations.." | correctionErrors="..aimCorrectionErrors)
     elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
     elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
     elseif input=="clear" then table.clear(logs);logBox.Text=""
@@ -2011,6 +2102,12 @@ connect(Workspace.ChildRemoved,function(child)
     if child == watchedRoot then watchPlayerFolder() end
 end)
 connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
+    if aimObservedCameraConnection then
+        aimObservedCameraConnection:Disconnect()
+        aimObservedCameraConnection=nil
+    end
+    aimObservedCamera=nil
+    disableAimCorrection()
     for _,w in pairs(widgets) do if w.highlight then w.highlight:Destroy();w.highlight=nil end end
     clampWindow(false)
     log("INFO","Camera changed; optional highlights reset")
@@ -2031,7 +2128,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.5 loaded. Read-only Camera & Input Diagnostics in Debug tab | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.7.6 loaded. Experimental Scriptable-camera stabilization; test in-game | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
