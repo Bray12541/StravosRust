@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.5.1
+    SPECTRA / PHASE 1                         v1.6.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.5.1"
+local VERSION = "1.6.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -165,7 +165,8 @@ end
 -- Only treat an anonymous Workspace model as an enemy if its parent group
 -- or its own metadata explicitly identifies a real opposing Roblox Team.
 local calibratedEnemyGroup = nil
-local calibrationMessage = "Not calibrated - aim at a visible enemy and press F6"
+local calibrationMode = "none" -- none/manual/automatic
+local calibrationMessage = "Automatic identification pending"
 local watchedRoot = nil
 local watcherConnections = {}
 local scanDirty = false
@@ -184,7 +185,8 @@ local function getTeamGroup(object)
 end
 local function clearCalibration()
     calibratedEnemyGroup = nil
-    calibrationMessage = "Not calibrated - aim at a visible enemy and press F6"
+    calibrationMode = "none"
+    calibrationMessage = "Automatic identification pending"
     scanDirty = true
     scanAccumulator = 10
 end
@@ -390,8 +392,82 @@ local function identifyPlayer(model)
     end
     return nil
 end
+-- Automatic identification without F6 is safe only when one remote
+-- character exists in a two-player server. Larger games expose no team
+-- identities, so this never guesses which of two groups is hostile.
+local function autoResolveEnemyGroup()
+    local players = Players:GetPlayers()
+    if calibrationMode == "manual" and calibratedEnemyGroup then return end
+    if #players ~= 2 then
+        if calibrationMode == "automatic" then
+            calibratedEnemyGroup = nil
+            calibrationMode = "none"
+        end
+        if calibrationMode == "none" then
+            calibrationMessage = "Auto identification unavailable: teams are not exposed for larger lobbies"
+        end
+        return
+    end
+    local folder = Workspace:FindFirstChild("Players")
+    if not folder then
+        calibratedEnemyGroup = nil
+        calibrationMode = "none"
+        calibrationMessage = "Auto: waiting for replicated character groups"
+        return
+    end
+    local candidateGroup, count = nil, 0
+    local foundLocalModel = false
+    local queue = {{folder,0}}
+    local at, checked = 1,0
+    local camera = Workspace.CurrentCamera
+    while at <= #queue and checked < 650 do
+        local item = queue[at]
+        at += 1
+        local node, depth = item[1], item[2]
+        for _, child in ipairs(node:GetChildren()) do
+            checked += 1
+            if checked > 650 then break end
+            if child:IsA("Folder") and depth < 3 then
+                queue[#queue+1] = {child,depth+1}
+            elseif child:IsA("Model") then
+                local ok, modelRoot = validModel(child)
+                if ok then
+                    local owner = identifyPlayer(child)
+                    if owner == LocalPlayer then
+                        foundLocalModel = true
+                    else
+                        local group = getTeamGroup(child)
+                        local distance = camera and (camera.CFrame.Position-modelRoot.Position).Magnitude or 50
+                        if group and distance > 5 then
+                            count += 1
+                            if count == 1 then candidateGroup = group end
+                            if group ~= candidateGroup then candidateGroup = nil end
+                        end
+                    end
+                end
+                if depth < 2 then queue[#queue+1] = {child,depth+1} end
+            end
+        end
+    end
+    if count == 1 and candidateGroup and not foundLocalModel then
+        if calibrationMode ~= "automatic" or calibratedEnemyGroup ~= candidateGroup then
+            calibratedEnemyGroup = candidateGroup
+            calibrationMode = "automatic"
+            calibrationMessage = "Auto: lone opponent identified (2-player server)"
+            log("INFO","Automatic enemy-group detection succeeded; no F6 required.")
+        end
+    else
+        if calibrationMode == "automatic" then
+            calibratedEnemyGroup = nil
+            calibrationMode = "none"
+        end
+        calibrationMessage = string.format("Auto: waiting for unique opponent (candidate rigs=%d)",count)
+    end
+end
+
 local function discoverTargets()
     if not alive then return end
+    autoResolveEnemyGroup()
     local seen, nextTargets = {}, {}
     local verified, unverified, checked, rejected, excluded, skeletonRigs, groupEnemies, unknownTeam = 0, 0, 0, 0, 0, 0, 0, 0
     local samples = {}
@@ -603,6 +679,7 @@ local function calibrateEnemyFromCrosshair()
         return
     end
     calibratedEnemyGroup = group
+    calibrationMode = "manual"
     calibrationMessage = "Enemy group selected (F6); other groups excluded"
     scanDirty = true
     scanAccumulator = 10
@@ -726,6 +803,7 @@ local function calibrateAtPixel(point)
         return
     end
     calibratedEnemyGroup=selected
+    calibrationMode="manual"
     calibrationMessage="Enemy group calibrated from selected character"
     scanDirty=true
     scanAccumulator=10
@@ -1035,6 +1113,7 @@ local function report()
         "Enemy-only tracking: "..tostring(stats.teammates).." allies excluded; unknown teams: "..tostring(stats.unknownTeams),
         "Group-matched enemy rigs: "..tostring(stats.enemyGroups).." (only when Roblox Team names match)",
         "Calibration: "..calibrationMessage,
+        "Calibration mode: "..calibrationMode,
         "Group events observed: "..tostring(groupEvents),
         "Fixed limits: 1000 studs / 50 Hz target",
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
@@ -1069,6 +1148,7 @@ local function shutdown()
     table.clear(watcherConnections)
     table.clear(connections)
     calibratedEnemyGroup = nil
+    calibrationMode = "none"
     if overlayGui then overlayGui:Destroy(); overlayGui=nil end
     if menuGui then menuGui:Destroy(); menuGui=nil end
     targets={}
@@ -1094,7 +1174,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.5.1",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.6",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1198,7 +1278,7 @@ local function action(page,label,callback)
 end
 
 local espPage=pages.ESP
-header(espPage,"Player visuals","Enemy-group calibration · read-only overlay")
+header(espPage,"Player visuals","Automatic opponent detection in 1v1; manual fallback")
 groupLabel(espPage,"DISPLAY")
 toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
 toggle(espPage,"2D boxes","Screen-space rectangles around verified characters","boxes")
@@ -1208,7 +1288,7 @@ toggle(espPage,"Skeleton","Real rig joints where found; estimated 2D shape other
 toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
 groupLabel(espPage,"ENEMY IDENTIFICATION")
 action(espPage,"Select visible enemy (click to calibrate)",beginPicker)
-row(espPage,"F6 - Quick calibration","Alternative: aim exactly at enemy torso and press F6")
+row(espPage,"F6 - Optional fallback","Only needed if game hides team identity in larger matches")
 local calibrationInfo = textLabel(espPage,"Not calibrated",11,C.muted)
 calibrationInfo.Size = UDim2.new(1,-3,0,26)
 calibrationInfo.TextWrapped = true
@@ -1409,8 +1489,8 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.5.1 loaded. Skeleton uses real joints or estimated shape | F8: debug | Ctrl+End: unload")
-log("INFO","No Roblox team data: Select visible enemy and click body to calibrate. Unknown groups stay hidden.")
+log("INFO","SPECTRA Phase 1 v1.6 loaded. Automatic 1v1 opponent discovery | F8: debug | Ctrl+End: unload")
+log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
