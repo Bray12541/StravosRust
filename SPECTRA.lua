@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.10.3
+    SPECTRA / PHASE 1                         v1.10.4
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.10.3"
+local VERSION = "1.10.4"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -2086,7 +2086,9 @@ local Compat=(function()
         if c.elapsed>=10 then
             compat.observation=nil
             local status
-            if c.samplesWithInput<2 then
+            if c.changedSubject>0 then
+                status="INCONCLUSIVE: CameraSubject changed during observation (respawn or spectating possible)"
+            elseif c.samplesWithInput<2 then
                 status="INCONCLUSIVE: little/no WASD input recorded (menu may have remained open)"
             elseif c.samplesWithMotion<2 then
                 status="INCONCLUSIVE: subject root did not visibly move during sampling"
@@ -2677,7 +2679,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.3",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.4",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3299,7 +3301,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.10.3 loaded. Opt-in read-only input and camera-subject correlation | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.10.4 loaded. Read-only control-correlation inspector with respawn guard | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
