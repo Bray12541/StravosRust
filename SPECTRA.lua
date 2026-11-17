@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.16.0
+    SPECTRA / PHASE 1                         v1.16.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.16.0"
+local VERSION = "1.16.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -81,7 +81,7 @@ local state = {
     aimSmoothing = 8,
     aimStyle = "Snap",
     aimSnapStrength = 100,
-    aimVisibleOnly = true,
+    aimVisibleOnly = false,
     aimHoldRmb = false,
     aimSticky = true,
     aimPoint = "Head",
@@ -1107,7 +1107,7 @@ local aimGateCounts = {
 }
 local aimLastGameplayStatus = "No test with the menu hidden yet"
 local aimLastGameplayTime = "never"
-local aimTargetProbe = {enemies=0,onScreen=0,insideFov=0,visible=0}
+local aimTargetProbe = {enemies=0,onScreen=0,insideFov=0,eligible=0,blocked=0}
 local aimLastRmbDetected = false
 local function recordAimGate(reason, status, gameplay)
     aimGateCounts[reason]=(aimGateCounts[reason] or 0)+1
@@ -1218,6 +1218,9 @@ local function getAimPosition(target)
 end
 
 local function aimHasLineOfSight(camera,target,position)
+    -- With the line-of-sight requirement disabled, target selection may
+    -- follow replicated enemy models behind map geometry. This changes
+    -- client targeting ONLY, not weapon collisions or bullet penetration.
     if not state.aimVisibleOnly then return true end
     local origin=camera.CFrame.Position
     local vector=position-origin
@@ -1242,7 +1245,7 @@ local function aimHasLineOfSight(camera,target,position)
 end
 
 local function chooseAimTarget(camera)
-    aimTargetProbe={enemies=0,onScreen=0,insideFov=0,visible=0}
+    aimTargetProbe={enemies=0,onScreen=0,insideFov=0,eligible=0,blocked=0}
     local size=camera.ViewportSize
     if size.X<1 or size.Y<1 then return nil,nil end
     local center=Vector2.new(size.X*0.5,size.Y*0.5)
@@ -1271,7 +1274,7 @@ local function chooseAimTarget(camera)
                         if d<=allowed then
                             aimTargetProbe.insideFov+=1
                             if aimHasLineOfSight(camera,t,point) then
-                                aimTargetProbe.visible+=1
+                                aimTargetProbe.eligible+=1
                                 aimSelectionCount+=1
                                 -- Prefer the current target slightly to
                                 -- prevent jitter between nearby enemies.
@@ -1280,6 +1283,8 @@ local function chooseAimTarget(camera)
                                 if score<bestScore then
                                     best,bestPoint,bestDelta,bestScore=t,point,delta,score
                                 end
+                            else
+                                aimTargetProbe.blocked+=1
                             end
                         end
                     end
@@ -1345,7 +1350,9 @@ local function runAimbot(dt)
     end
     local target,point,delta=chooseAimTarget(camera)
     if not target then
-        recordAimGate("noTarget","No enemy target inside FOV / line of sight",true)
+        recordAimGate("noTarget",state.aimVisibleOnly
+            and "No enemy inside FOV with clear line of sight"
+            or "No projected enemy target inside FOV",true)
         aimSelected=nil
         return
     end
@@ -2483,9 +2490,10 @@ local function getInputDiagnosticsLines()
         "Hold-RMB setting: "..(state.aimHoldRmb and "ON" or "OFF")
             .." | detected RMB: "..tostring(aimLastRmbDetected),
         getAimGateDiagnostics(),
-        string.format("Target checks: %d enemies | %d on screen | %d in FOV | %d visible",
+        string.format("Target checks: %d enemies | %d projected on screen | %d in FOV | %d eligible | %d blocked (LOS requirement %s)",
             aimTargetProbe.enemies,aimTargetProbe.onScreen,
-            aimTargetProbe.insideFov,aimTargetProbe.visible),
+            aimTargetProbe.insideFov,aimTargetProbe.eligible,
+            aimTargetProbe.blocked,state.aimVisibleOnly and "ON" or "OFF"),
         string.format("Aim writes: %d | move samples: %d | override samples: %d",
             aimUpdates,aimMovementSamples,aimOverrideSamples),
         string.format("Aim chosen backend: %s | mouse API: %s | relative mouse writes: %d | failures: %d | last delta: (%d,%d)",
@@ -2632,7 +2640,8 @@ local function report()
         "Aim FOV: "..state.aimFovRadius.." px | style: "..state.aimStyle
             .." | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
         "Aim activation: "..(state.aimHoldRmb and "Hold RMB" or "Always when enabled"),
-        "Aim visible-only: "..tostring(state.aimVisibleOnly).." | candidates: "..aimSelectionCount,
+        "Aim requires line of sight: "..tostring(state.aimVisibleOnly)
+            .." | eligible candidates: "..aimSelectionCount,
         "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
         "Aim RMB setting: "..tostring(state.aimHoldRmb).." | "..getAimGateDiagnostics(),
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
@@ -2730,7 +2739,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.16.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.16.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2888,11 +2897,11 @@ local function launchSpectraUI()
     end
 
     local aimPage=pages.Aimbot
-    header(aimPage,"Aimbot","Snap toward visible enemy targets inside the FOV circle")
+    header(aimPage,"Aimbot","Snap toward projected enemy targets inside the FOV circle")
     groupLabel(aimPage,"TARGETING")
     toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
     toggle(aimPage,"Hold right mouse","Optional: require RMB; off = automatic while enabled","aimHoldRmb")
-    toggle(aimPage,"Visibility check","Only aim at unobstructed targets","aimVisibleOnly")
+    toggle(aimPage,"Require clear line of sight","Off by default: continue tracking behind cover","aimVisibleOnly")
     toggle(aimPage,"Sticky targets","Prefer the previous enemy to reduce rapid target switching","aimSticky")
     local aimPointButton
     aimPointButton=action(aimPage,"Aim point: Head",function()
@@ -2927,6 +2936,7 @@ local function launchSpectraUI()
         aimMethodButton.Text="Aim method: "..state.aimMethod
         log("INFO","Aimbot method: "..state.aimMethod)
     end)
+    row(aimPage,"Cover behavior","With clear LOS OFF, targets behind structures remain eligible inside the FOV circle. Bullets do not pass through walls.")
     row(aimPage,"Runtime compatibility","Snap uses fast relative mouse input on Scriptable cameras or instant camera correction otherwise; weapon/reticle response unverified.")
     groupLabel(aimPage,"AIMBOT DIAGNOSTICS")
     action(aimPage,"Print Aimbot diagnostics to Roblox logs",function()
@@ -3352,7 +3362,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.16.0 loaded. Snap style, strict visible-only FOV targeting and fast mouse/camera aiming")
+    log("INFO","SPECTRA Phase 1 v1.16.1 loaded. Snap targeting tracks projected enemies behind cover; LOS remains optional")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
