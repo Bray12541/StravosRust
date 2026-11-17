@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.3.0
+    SPECTRA / PHASE 1                         v1.3.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.3.0"
+local VERSION = "1.3.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -37,7 +37,7 @@ local logs = {}
 local targets = {}
 local lastSource = "Not scanned"
 local lastScanDetails = "Not scanned"
-local stats = {discovered=0, matched=0, anonymous=0, teammates=0, skeletonRigs=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
+local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
 local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu
 local focusedTab = "ESP"
 local tabs = {}
@@ -70,7 +70,7 @@ local COLOR_MODES = {
     White = Color3.fromRGB(228, 233, 239)
 }
 local state = {
-    enabled = false,
+    enabled = true,
     boxes = true,
     distances = true,
     tracers = false,
@@ -136,17 +136,55 @@ local function safeParent(gui)
     local ok = pcall(function() gui.Parent = game:GetService("CoreGui") end)
     return ok
 end
-local function isTeammate(player)
-    if not player or player == LocalPlayer then return true end
-    -- Prefer verified Roblox team identities. Custom game teams may not
-    -- be represented by Player.Team / TeamColor.
-    if LocalPlayer.Team and player.Team then
-        return LocalPlayer.Team == player.Team
+-- Never equate two default TeamColor values with confirmed teammates.
+-- Use Team objects when available; fall back only to unique non-neutral team
+-- colors that correspond to actual Team objects in the experience.
+local TeamsService = game:GetService("Teams")
+local function getPlayerRelation(player)
+    if not player or player == LocalPlayer then return "ally" end
+    local mine, theirs = LocalPlayer.Team, player.Team
+    if mine and theirs then
+        return mine == theirs and "ally" or "enemy"
     end
     if not LocalPlayer.Neutral and not player.Neutral then
-        return LocalPlayer.TeamColor == player.TeamColor
+        local mineColor, otherColor = LocalPlayer.TeamColor, player.TeamColor
+        local knownMine, knownOther = false, false
+        for _, team in ipairs(TeamsService:GetTeams()) do
+            if team.TeamColor == mineColor then knownMine = true end
+            if team.TeamColor == otherColor then knownOther = true end
+        end
+        if knownMine and knownOther then
+            return mineColor == otherColor and "ally" or "enemy"
+        end
     end
-    return false
+    return "unknown"
+end
+local function isTeammate(player)
+    return getPlayerRelation(player) ~= "enemy"
+end
+-- Only treat an anonymous Workspace model as an enemy if its parent group
+-- or its own metadata explicitly identifies a real opposing Roblox Team.
+local function getGroupRelation(model)
+    local mine = LocalPlayer.Team
+    if not mine then return "unknown" end
+    local group = model
+    for _ = 1, 4 do
+        if not group or group == Workspace then break end
+        local nameCandidates = {
+            group:GetAttribute("Team"), group:GetAttribute("TeamName"),
+            group:GetAttribute("TeamId"), group.Name,
+        }
+        for _, candidate in ipairs(nameCandidates) do
+            if typeof(candidate) == "string" then
+                local t = TeamsService:FindFirstChild(candidate)
+                if t and t:IsA("Team") then
+                    return t == mine and "ally" or "enemy"
+                end
+            end
+        end
+        group = group.Parent
+    end
+    return "unknown"
 end
 local function markerColor()
     return COLOR_MODES[state.color] or C.accent
@@ -263,14 +301,53 @@ local function validModel(model)
     return true, root, cf, size
 end
 local function identifyPlayer(model)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Character == model or model.Name == p.Name then return p end
+    local all = Players:GetPlayers()
+    local function resolve(value)
+        if typeof(value) == "Instance" then
+            if value:IsA("Player") then return value end
+            if value:IsA("ObjectValue") then return resolve(value.Value) end
+            if value:IsA("StringValue") or value:IsA("IntValue") or value:IsA("NumberValue") then
+                value = value.Value
+            else
+                return nil
+            end
+        end
+        if value == nil then return nil end
+        local candidate = tostring(value)
+        for _, player in ipairs(all) do
+            if candidate == player.Name or candidate == tostring(player.UserId) then
+                return player
+            end
+        end
+        return nil
     end
-    -- Attribute-based identification, when an experience exposes it.
-    local candidate = model:GetAttribute("PlayerName") or model:GetAttribute("Username") or model:GetAttribute("PlayerUserId")
-    if candidate ~= nil then
-        for _, p in ipairs(Players:GetPlayers()) do
-            if tostring(candidate) == p.Name or tostring(candidate) == tostring(p.UserId) then return p end
+    for _, player in ipairs(all) do
+        if player.Character and (player.Character == model or model:IsDescendantOf(player.Character)) then
+            return player
+        end
+    end
+    local candidate = resolve(model.Name)
+    if candidate then return candidate end
+    for _, attributeName in ipairs({"PlayerName","Username","PlayerUserId","UserId","Owner","OwnerId","Player"}) do
+        candidate = resolve(model:GetAttribute(attributeName))
+        if candidate then return candidate end
+    end
+    -- Inspect only direct ownership values and immediate container attributes,
+    -- not arbitrary deep descendants or expensive whole-workspace searches.
+    local parent = model.Parent
+    if parent and parent ~= Workspace then
+        for _, attributeName in ipairs({"PlayerName","Username","PlayerUserId","UserId","OwnerId"}) do
+            candidate = resolve(parent:GetAttribute(attributeName))
+            if candidate then return candidate end
+        end
+    end
+    for _, child in ipairs(model:GetChildren()) do
+        if child:IsA("ObjectValue") or child:IsA("StringValue") or child:IsA("IntValue") then
+            if child.Name == "Player" or child.Name == "Owner" or child.Name == "PlayerName"
+                or child.Name == "UserId" or child.Name == "PlayerUserId" then
+                candidate = resolve(child)
+                if candidate then return candidate end
+            end
         end
     end
     return nil
@@ -278,24 +355,39 @@ end
 local function discoverTargets()
     if not alive then return end
     local seen, nextTargets = {}, {}
-    local verified, unverified, checked, rejected, excluded, skeletonRigs = 0, 0, 0, 0, 0, 0
+    local verified, unverified, checked, rejected, excluded, skeletonRigs, groupEnemies, unknownTeam = 0, 0, 0, 0, 0, 0, 0, 0
+    local samples = {}
     local function admit(model, player, source)
         if seen[model] or #nextTargets >= 72 then return end
         seen[model] = true
         if player == LocalPlayer then return end
         local ok, root = validModel(model)
         if not ok then rejected += 1; return end
-        -- Unknown rigs cannot be safely classified by team. Keep them in
-        -- diagnostics only; never put them in the ESP tracking/render list.
-        if not player then unverified += 1; return end
-        if isTeammate(player) then excluded += 1; return end
+
+        local relation = player and getPlayerRelation(player) or getGroupRelation(model)
+        if relation == "ally" then
+            excluded += 1
+            return
+        end
+        if relation == "unknown" then
+            if not player then
+                unverified += 1
+            else
+                unknownTeam += 1
+            end
+            if #samples < 4 then
+                samples[#samples+1] = model.Name .. " (" .. source .. ")"
+            end
+            return
+        end
+
         local segments = collectSkeletonSegments(model)
         if #segments > 0 then skeletonRigs += 1 end
+        if player then verified += 1 else groupEnemies += 1 end
         nextTargets[#nextTargets+1] = {
             model=model, root=root, player=player,
-            label=player.DisplayName, source=source, bones=segments
+            source=source, bones=segments, relation="enemy"
         }
-        verified += 1
     end
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
@@ -325,20 +417,25 @@ local function discoverTargets()
         lastSource = "Workspace.Players absent"
     end
     local aliveKeys = {}
-    for _, t in ipairs(nextTargets) do aliveKeys[t.model] = true end
+    for _, target in ipairs(nextTargets) do aliveKeys[target.model] = true end
     for key in pairs(widgets) do if not aliveKeys[key] then destroyWidget(key) end end
     targets = nextTargets
     stats.discovered = #targets
     stats.matched = verified
     stats.anonymous = unverified
+    stats.enemyGroups = groupEnemies
+    stats.unknownTeams = unknownTeam
     stats.teammates = excluded
     stats.skeletonRigs = skeletonRigs
     stats.rejected = rejected
     stats.scans += 1
     lastScanDetails = string.format(
-        "tracked=%d unknown=%d teammatesExcluded=%d skeletonRigs=%d rejected=%d checked=%d players=%d",
-        verified, unverified, excluded, skeletonRigs, rejected, checked, #Players:GetPlayers()
+        "targets=%d verified=%d enemy-group=%d unidentified=%d unknown-team=%d allies=%d rigged=%d rejected=%d checked=%d players=%d",
+        #targets, verified, groupEnemies, unverified, unknownTeam, excluded, skeletonRigs, rejected, checked, #Players:GetPlayers()
     )
+    if #targets == 0 and #samples > 0 then
+        lastScanDetails ..= " samples: " .. table.concat(samples, ", ")
+    end
 end
 
 local function projectBox(camera, model)
@@ -426,7 +523,7 @@ local function render()
         local model = t.model
         local w = widgets[model]
         local shouldShow = model.Parent ~= nil and t.root and t.root.Parent ~= nil
-            and t.player and not isTeammate(t.player)
+            and t.relation == "enemy" and (not t.player or getPlayerRelation(t.player) == "enemy")
         local distance = 0
         if shouldShow then
             distance = (camera.CFrame.Position - t.root.Position).Magnitude
@@ -482,12 +579,13 @@ local function report()
         "Folder: "..lastSource,
         "Discovery: "..lastScanDetails,
         "Visible targets: "..tostring(stats.rendered),
-        "Identity status: "..(stats.matched>0 and "verified non-teammate targets available" or "NO verified non-teammate models; unverified rigs are never tracked"),
+        "Identity status: "..(#targets>0 and "opposing-team models available" or "NO ENEMY MODELS: identities/team data missing or unavailable"),
         "FPS: "..string.format("%.0f",stats.fps).." / render target: 50 Hz (limited by FPS)",
         "Connections tracked: "..tostring(#connections),
         "Scans: "..tostring(stats.scans),
         "Options: boxes="..tostring(state.boxes).." skeleton="..tostring(state.skeleton).." highlights="..tostring(state.highlights),
-        "Enemy-only tracking: "..tostring(stats.teammates).." teammates excluded (requires Roblox team data)",
+        "Enemy-only tracking: "..tostring(stats.teammates).." allies excluded; unknown teams: "..tostring(stats.unknownTeams),
+        "Group-matched enemy rigs: "..tostring(stats.enemyGroups).." (only when Roblox Team names match)",
         "Fixed limits: 1000 studs / 50 Hz target",
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.matched),
         "No getgc, hooks, remote scripts, or writes to other character models.",
@@ -539,7 +637,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.3",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.3.1",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -628,8 +726,6 @@ local function toggle(page,label,help,key)
             for _,w in pairs(widgets) do hideWidget(w) end
         elseif key=="enabled" and state[key] then
             scanAccumulator=10
-        elseif key=="anonymous" and state[key] then
-            log("WARN","Unverified models can include environment props. Yellow markers are not identified players.")
         end
         log("INFO",label.." = "..tostring(state[key]))
     end)
@@ -645,7 +741,7 @@ local function action(page,label,callback)
 end
 
 local espPage=pages.ESP
-header(espPage,"Player visuals","Identified players only · excludes detected teammates")
+header(espPage,"Player visuals","Enemy team only · missing team data never renders")
 groupLabel(espPage,"DISPLAY")
 toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
 toggle(espPage,"2D boxes","Screen-space rectangles around verified characters","boxes")
@@ -654,7 +750,7 @@ toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
 toggle(espPage,"Skeleton","Uses rig Motor6D joints, Bones, or standard limbs where present","skeleton")
 toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
 groupLabel(espPage,"FIXED RULES")
-row(espPage,"Teammates excluded","Auto-filtered when Roblox team data is available")
+row(espPage,"Teammates excluded","Unknown-team models hidden until team can be verified")
 row(espPage,"1000 studs · 50 Hz","Hardcoded range and marker refresh target")
 
 local colorButton
@@ -739,7 +835,7 @@ round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
     if input=="help" then log("INFO","Commands: help, status, probe, targets, recenter, esp on, esp off, clear, unload")
-    elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." tracked="..stats.matched.." excluded="..stats.teammates.." skeletonRigs="..stats.skeletonRigs.." fps="..math.floor(stats.fps).." connections="..#connections)
+    elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
     elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
     elseif input=="targets" then
@@ -809,7 +905,7 @@ connect(RunService.RenderStepped,function(dt)
     if statAccumulator>=0.7 then
         statAccumulator=0
         if statusText and statusText.Parent then
-            statusText.Text=string.format("ESP %s  ·  %d tracked / %d teammates excluded  ·  %d shown  ·  %d FPS",state.enabled and "ON" or "OFF",stats.matched,stats.teammates,stats.rendered,math.floor(stats.fps+0.5))
+            statusText.Text=string.format("ESP %s  ·  %d targets / %d unknown  ·  %d shown  ·  %d FPS",state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
         clampWindow(false)
         if debugSummary and debugSummary.Parent then
@@ -825,7 +921,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.3 loaded. Right Shift: hide/show | F8: debug | Ctrl+End: unload")
-log("INFO","Only verified non-teammate players are tracked; unverified rigs remain diagnostic-only")
+log("INFO","SPECTRA Phase 1 v1.3.1 loaded. Right Shift: hide/show | F8: debug | Ctrl+End: unload")
+log("INFO","Enemy-only tracking; unknown team/owner models are excluded, diagnostics show the reason")
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
