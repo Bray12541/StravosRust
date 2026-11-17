@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.10.1
+    SPECTRA / PHASE 1                         v1.10.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.10.1"
+local VERSION = "1.10.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1983,7 +1983,11 @@ end)()
 -- Reports are explicitly labeled "unverified" where replication/server control
 -- cannot be established from a client-side observation.
 local Compat=(function()
-    local compat={text="No snapshot yet",lastTime="never",view=nil}
+    local compat={
+        text="No snapshot yet",lastTime="never",view=nil,
+        previousSubject=nil,previousRoot=nil,previousPosition=nil,
+        previousCameraPosition=nil,previousClock=nil
+    }
     local function readable(fn,fallback)
         local ok,value=pcall(fn)
         if ok and value~=nil then return value end
@@ -2048,10 +2052,43 @@ local Compat=(function()
                 elseif subjectOwner then ownership="another identified player" end
                 line("CameraSubject model: "..tostring(subjectModel.Name):sub(1,60))
                 line("CameraSubject model ownership: "..ownership)
+                local nativeOwner=readable(function()
+                    return Players:GetPlayerFromCharacter(subjectModel)
+                end,nil)
+                line("Roblox GetPlayerFromCharacter: "..(nativeOwner
+                    and (nativeOwner==LocalPlayer and "LOCAL PLAYER" or "OTHER PLAYER")
+                    or "nil / unsupported"))
                 local subjectRoot=readable(function() return getRoot(subjectModel) end,nil)
                 line("CameraSubject model root: "..(subjectRoot and subjectRoot.Name or "none"))
                 if subjectRoot then
                     line("CameraSubject root anchored: "..bool(readable(function() return subjectRoot.Anchored end,false)))
+                    local rootPosition=readable(function() return subjectRoot.Position end,nil)
+                    local cameraPosition=camera and readable(function() return camera.CFrame.Position end,nil) or nil
+                    if rootPosition and cameraPosition then
+                        line(string.format("Camera-to-subject root distance: %.1f studs (not ownership proof)",
+                            (cameraPosition-rootPosition).Magnitude))
+                    end
+                    local now=os.clock()
+                    if compat.previousSubject==subject and compat.previousRoot==subjectRoot
+                        and compat.previousPosition and compat.previousClock then
+                        local elapsed=math.max(0,now-compat.previousClock)
+                        local current=rootPosition
+                        if current then
+                            line(string.format("Same camera subject across snapshots: YES; %.1f s elapsed; root moved %.1f studs",
+                                elapsed,(current-compat.previousPosition).Magnitude))
+                            if compat.previousCameraPosition and cameraPosition then
+                                line(string.format("Camera moved %.1f studs over same interval (correlation only)",
+                                    (cameraPosition-compat.previousCameraPosition).Magnitude))
+                            end
+                        end
+                    else
+                        line("Same camera subject across snapshots: no prior matching sample")
+                    end
+                    compat.previousSubject=subject
+                    compat.previousRoot=subjectRoot
+                    compat.previousPosition=rootPosition
+                    compat.previousCameraPosition=cameraPosition
+                    compat.previousClock=now
                 end
                 local subjectChildren=readable(function() return subjectModel:GetChildren() end,{})
                 local parts,humanoids,other=0,0,0
@@ -2062,6 +2099,14 @@ local Compat=(function()
                     else other+=1 end
                 end
                 line(string.format("CameraSubject model immediate children (max 120): parts=%d humanoids=%d other=%d",parts,humanoids,other))
+                if subject:IsA("Humanoid") then
+                    line("CameraSubject Humanoid.MoveDirection magnitude: "..tostring(readable(function()
+                        return string.format("%.2f",subject.MoveDirection.Magnitude)
+                    end,"unavailable")))
+                    line("CameraSubject Humanoid.WalkSpeed: "..tostring(readable(function()
+                        return subject.WalkSpeed
+                    end,"unavailable")))
+                end
             else
                 line("CameraSubject model: no Model ancestor exposed")
             end
@@ -2528,7 +2573,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.2",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3142,7 +3187,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.10.1 loaded. CameraSubject ancestry and owner verification | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.10.2 loaded. CameraSubject motion correlation and native owner lookup | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
