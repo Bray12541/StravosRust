@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.11.2
+    SPECTRA / PHASE 1                         v1.11.3
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.11.2"
+local VERSION = "1.11.3"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1564,7 +1564,7 @@ end
 -- Pending/confirmed models are never persisted and expire on camera or rig
 -- changes, remote ownership matches, or a conflicting Player.Character.
 local SelfCalibration=(function()
-    local cal={pending=nil,active=nil,status="No session calibration"}
+    local cal={pending=nil,active=nil,status="No session calibration",rearmRequested=false}
     local function currentContext()
         local camera=Workspace.CurrentCamera
         local subject=camera and camera.CameraSubject
@@ -1613,7 +1613,17 @@ local SelfCalibration=(function()
         local hadPending=cal.pending~=nil
         cal.pending=nil
         cal.active=nil
-        cal.status="Not calibrated: "..tostring(reason or "cleared")
+        if reason=="Cleared by user" or reason=="SPECTRA unloaded"
+            or reason=="New observation started" then
+            cal.rearmRequested=false
+        elseif wasActive then
+            -- Previous confirmed model changed. Gather evidence again;
+            -- never transfer its confirmation to a new model.
+            cal.rearmRequested=true
+        end
+        cal.status=cal.rearmRequested
+            and "Redeploy detected: walk with WASD for automatic 6s recheck, then confirm in Compat"
+            or "Not calibrated: "..tostring(reason or "cleared")
         if wasActive or hadPending then
             print("[SPECTRA CAL] "..cal.status)
         end
@@ -1656,6 +1666,7 @@ local SelfCalibration=(function()
         if not ok then clear(reason);return false end
         cal.active=p
         cal.pending=nil
+        cal.rearmRequested=false
         cal.status="SESSION-CONFIRMED camera-followed model "..p.model.Name
             .." (ownership NOT verified; client-only attempts)"
         print("[SPECTRA CAL] "..cal.status)
@@ -1671,6 +1682,17 @@ local SelfCalibration=(function()
     local function isCurrent(model)
         return validate() and model~=nil and model==cal.active.model
     end
+    local function readyForRearm()
+        if not cal.rearmRequested or cal.active or cal.pending then return false end
+        local camera,subject,model,root=currentContext()
+        if not camera or not subject or not subject:IsA("Humanoid")
+            or not model or not root then return false end
+        local eligible=verifyContext({camera=camera,subject=subject,model=model,root=root})
+        return eligible
+    end
+    local function markRearmStarted()
+        cal.rearmRequested=false
+    end
     local function status()
         if cal.active then validate() end
         if cal.pending then
@@ -1680,6 +1702,8 @@ local SelfCalibration=(function()
         return cal.status
     end
     cal.offer=offer
+    cal.readyForRearm=readyForRearm
+    cal.markRearmStarted=markRearmStarted
     cal.confirm=confirm
     cal.clear=clear
     cal.validate=validate
@@ -2156,11 +2180,12 @@ local Compat=(function()
         end
         return false
     end
-    local function startObservation()
+    local function startObservation(mode)
         if compat.observation then
-            log("INFO","A 10-second compatibility capture is already running")
+            log("INFO","A compatibility capture is already running")
             return
         end
+        local redeployCheck=mode=="redeploy"
         -- Do not let an earlier, unverified candidate remain authorized
         -- while a fresh capture examines a potentially different model.
         if SelfCalibration.active or SelfCalibration.pending then
@@ -2169,7 +2194,9 @@ local Compat=(function()
             Movement.data.humanoid=nil;Movement.data.source="none"
             SelfCalibration.clear("New observation started")
         end
+        if redeployCheck then SelfCalibration.markRearmStarted() end
         compat.observation={
+            duration=redeployCheck and 6 or 10,
             elapsed=0,accumulated=0,secondsWithInput=0,samples=0,
             samplesWithInput=0,samplesWithMotion=0,
             motionAndInput=0,changedSubject=0,
@@ -2177,12 +2204,22 @@ local Compat=(function()
             previousRoot=nil,previousCamera=nil,subject=nil,
             previousSubject=nil
         }
-        compat.lastObservation="Observing local keyboard input and camera-followed model for up to 10 seconds..."
-        log("INFO","Read-only 10-second observation started. Close menu and walk with WASD; no gameplay changes made.")
+        compat.lastObservation=(redeployCheck and "Redeploy recheck" or "Manual recheck")
+            ..": recording movement input and camera-followed model."
+        log("INFO",redeployCheck
+            and "New character: automatic read-only 6s observation started. Continue walking; confirmation still required."
+            or "Read-only 10-second observation started. Close menu and walk with WASD; no gameplay changes made.")
     end
     local function sampleObservation(dt)
         local c=compat.observation
-        if not c then return end
+        if not c then
+            -- Resume evidence collection on an actual moving new Humanoid,
+            -- but never silently confirm a new or spectated model.
+            if SelfCalibration.readyForRearm() and observationKeyDown() then
+                startObservation("redeploy")
+            end
+            return
+        end
         if type(dt)~="number" or dt<=0 then return end
         c.elapsed+=math.min(dt,0.5)
         c.accumulated+=math.min(dt,0.5)
@@ -2227,7 +2264,7 @@ local Compat=(function()
             c.previousCamera=cameraPosition
             c.previousSubject=subject
         end
-        if c.elapsed>=10 then
+        if c.elapsed>=c.duration then
             compat.observation=nil
             local status
             if c.changedSubject>0 then
@@ -2242,8 +2279,8 @@ local Compat=(function()
                 status="UNCONFIRMED: subject motion and local WASD input did not sufficiently overlap"
             end
             compat.lastObservation=string.format(
-                "10 s observation: %s\n%d samples; WASD held ~%.1f s; moving samples %d; movement+WASD samples %d; Humanoid MoveDirection samples %d; subject changes %d\nTotal root travel: %.1f studs; camera travel: %.1f studs. Spectating cannot be excluded.",
-                status,c.samples,c.secondsWithInput,c.samplesWithMotion,c.motionAndInput,
+                "%d s observation: %s\n%d samples; WASD held ~%.1f s; moving samples %d; movement+WASD samples %d; Humanoid MoveDirection samples %d; subject changes %d\nTotal root travel: %.1f studs; camera travel: %.1f studs. Spectating cannot be excluded.",
+                c.duration,status,c.samples,c.secondsWithInput,c.samplesWithMotion,c.motionAndInput,
                 c.humanoidMoveSamples,c.changedSubject,c.rootPath,c.cameraPath)
             print("[SPECTRA COMPAT MOTION] "..compat.lastObservation:gsub("\n"," | "))
             SelfCalibration.offer(c)
@@ -2826,7 +2863,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.2",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.3",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3122,7 +3159,8 @@ local function launchSpectraUI()
     end)
     action(compatPage,"Copy compatibility report",Compat.copy)
     row(compatPage,"Safety note","Confirmation is not ownership proof; spectator targets remain possible")
-    row(compatPage,"How to use","Run observation, then manually confirm the camera-followed model")
+    row(compatPage,"Redeploy recovery","After a confirmed life ends, walk to auto-scan; click Confirm again")
+    row(compatPage,"How to use","Manual first-life observation or automatic 6s redeploy recheck")
     local compatReportView=create("TextBox",{
         Text=Compat.text,TextEditable=false,MultiLine=true,ClearTextOnFocus=false,
         Font=Enum.Font.Code,TextSize=10,TextWrapped=true,
@@ -3469,7 +3507,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.11.2 loaded. Manual session calibration with reset, ownership and camera-change guards")
+    log("INFO","SPECTRA Phase 1 v1.11.3 loaded. Automatic read-only redeploy recheck; explicit confirmation still required")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
