@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.6.0
+    SPECTRA / PHASE 1                         v1.6.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.6.0"
+local VERSION = "1.6.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1174,7 +1174,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.6",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.6.1",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1191,8 +1191,6 @@ connect(unloadButton.MouseButton1Click,shutdown)
 create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1),Position=UDim2.fromOffset(0,53)},window)
 local left=create("Frame",{Position=UDim2.fromOffset(0,54),Size=UDim2.new(0,145,1,-54),BackgroundColor3=C.sidebar,BorderSizePixel=0},window)
 create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(0,1,1,0),Position=UDim2.new(1,-1,0,0)},left)
-local tag=textLabel(left,"WORKSPACE",10,C.muted,true)
-tag.Position=UDim2.fromOffset(16,19);tag.Size=UDim2.fromOffset(115,18)
 local content=create("Frame",{Position=UDim2.fromOffset(145,54),Size=UDim2.new(1,-145,1,-54),BackgroundTransparency=1,BorderSizePixel=0},window)
 local footer=create("Frame",{BackgroundColor3=C.base,BorderSizePixel=0,Position=UDim2.new(0,145,1,-32),Size=UDim2.new(1,-145,0,32)},window)
 create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1)},footer)
@@ -1202,9 +1200,9 @@ local pages={}
 local tabButtons={}
 for index,name in ipairs({"ESP","Settings","Debug"}) do
     local b=create("TextButton",{
-        Text=string.format("%02d    %s",index,name),TextSize=12,Font=Enum.Font.GothamMedium,
+        Text=name,TextSize=12,Font=Enum.Font.GothamMedium,
         TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,
-        BackgroundColor3=C.sidebar,Size=UDim2.fromOffset(123,35),Position=UDim2.fromOffset(11,46+(index-1)*42),BorderSizePixel=0
+        BackgroundColor3=C.sidebar,Size=UDim2.fromOffset(123,35),Position=UDim2.fromOffset(11,18+(index-1)*42),BorderSizePixel=0
     },left)
     create("UIPadding",{PaddingLeft=UDim.new(0,11)},b)
     round(b,5)
@@ -1278,39 +1276,14 @@ local function action(page,label,callback)
 end
 
 local espPage=pages.ESP
-header(espPage,"Player visuals","Automatic opponent detection in 1v1; manual fallback")
+header(espPage,"Player visuals","Configure your in-game overlay")
 groupLabel(espPage,"DISPLAY")
 toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
-toggle(espPage,"2D boxes","Screen-space rectangles around verified characters","boxes")
+toggle(espPage,"2D boxes","Screen-space rectangles around detected characters","boxes")
 toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
 toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
-toggle(espPage,"Skeleton","Real rig joints where found; estimated 2D shape otherwise","skeleton")
-toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
-groupLabel(espPage,"ENEMY IDENTIFICATION")
-action(espPage,"Select visible enemy (click to calibrate)",beginPicker)
-row(espPage,"F6 - Optional fallback","Only needed if game hides team identity in larger matches")
-local calibrationInfo = textLabel(espPage,"Not calibrated",11,C.muted)
-calibrationInfo.Size = UDim2.new(1,-3,0,26)
-calibrationInfo.TextWrapped = true
-action(espPage,"Clear team calibration",function()
-    clearCalibration()
-    log("INFO","Enemy-group calibration cleared")
-    discoverTargets()
-end)
-groupLabel(espPage,"FIXED RULES")
-row(espPage,"Teammates excluded","Only calibrated enemy group or verified enemy team renders")
-row(espPage,"1000 studs · 50 Hz","Hardcoded range and marker refresh target")
-
-local colorButton
-colorButton=action(espPage,"Marker color: Cyan  (click to cycle)",function()
-    local order={"Cyan","Coral","Lime","White"}
-    local n=1
-    for i,v in ipairs(order) do if v==state.color then n=i%#order+1 end end
-    state.color=order[n]
-    colorButton.Text="Marker color: "..state.color.."  (click to cycle)"
-    log("INFO","Marker color: "..state.color)
-end)
-
+toggle(espPage,"Skeleton","Real rig joints where found; estimated shape otherwise","skeleton")
+toggle(espPage,"3D highlight","Client-side character highlighting","highlights")
 
 -- Keep the menu fully inside the viewport, including after user dragging,
 -- display resolution changes, and inconsistent custom GUI parent sizes.
@@ -1334,7 +1307,19 @@ local function clampWindow(center)
 end
 
 local settingsPage=pages.Settings
-header(settingsPage,"Settings","Runtime behavior and clean shutdown")
+header(settingsPage,"Settings","Interface preferences and runtime controls")
+groupLabel(settingsPage,"APPEARANCE")
+local colorButton
+colorButton=action(settingsPage,"Marker color: Cyan  (click to cycle)",function()
+    local order={"Cyan","Coral","Lime","White"}
+    local n=1
+    for i,v in ipairs(order) do
+        if v==state.color then n=i%#order+1; break end
+    end
+    state.color=order[n]
+    colorButton.Text="Marker color: "..state.color.."  (click to cycle)"
+    log("INFO","Marker color: "..state.color)
+end)
 groupLabel(settingsPage,"KEYBINDS")
 local keyText=row(settingsPage,"Right Shift","Show or hide the menu")
 local debugText=row(settingsPage,"F8","Open the diagnostic console")
@@ -1466,9 +1451,6 @@ connect(RunService.RenderStepped,function(dt)
         if statusText and statusText.Parent then
             statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
-        if calibrationInfo and calibrationInfo.Parent then
-            calibrationInfo.Text=calibrationMessage
-        end
         clampWindow(false)
         if debugSummary and debugSummary.Parent then
             debugSummary.Text=string.format("%s\n%s   |   render target %d Hz",lastSource,lastScanDetails,UPDATE_HZ)
@@ -1489,7 +1471,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.6 loaded. Automatic 1v1 opponent discovery | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.6.1 loaded. Simplified menu | Automatic 1v1 detection | F8: debug | Ctrl+End: unload")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
