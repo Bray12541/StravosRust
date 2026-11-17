@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.11.1
+    SPECTRA / PHASE 1                         v1.11.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.11.1"
+local VERSION = "1.11.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -2161,6 +2161,14 @@ local Compat=(function()
             log("INFO","A 10-second compatibility capture is already running")
             return
         end
+        -- Do not let an earlier, unverified candidate remain authorized
+        -- while a fresh capture examines a potentially different model.
+        if SelfCalibration.active or SelfCalibration.pending then
+            Movement.restore()
+            Movement.data.model=nil;Movement.data.root=nil
+            Movement.data.humanoid=nil;Movement.data.source="none"
+            SelfCalibration.clear("New observation started")
+        end
         compat.observation={
             elapsed=0,accumulated=0,secondsWithInput=0,samples=0,
             samplesWithInput=0,samplesWithMotion=0,
@@ -2818,7 +2826,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.2",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3461,7 +3469,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.11.1 loaded. Session-only manual camera-character calibration, clear UI status, respawn guards")
+    log("INFO","SPECTRA Phase 1 v1.11.2 loaded. Manual session calibration with reset, ownership and camera-change guards")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
