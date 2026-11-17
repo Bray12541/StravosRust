@@ -2683,6 +2683,12 @@ local function getInputDiagnosticsLines()
             aimTargetProbe.insideFov,aimTargetProbe.visible),
         string.format("Aim writes: %d | move samples: %d | override samples: %d",
             aimUpdates,aimMovementSamples,aimOverrideSamples),
+        string.format("Aim chosen backend: %s | mouse API: %s | relative mouse writes: %d | failures: %d | last delta: (%d,%d)",
+            aimMetrics.lastMethod,aimMouseMove and "available" or "unavailable",
+            aimMetrics.mouseWrites,aimMetrics.mouseErrors,
+            aimMetrics.lastMouseDX,aimMetrics.lastMouseDY),
+        "Target switches: "..aimMetrics.targetSwitches
+            .." | sticky targeting: "..tostring(state.aimSticky),
         string.format("Last camera write: %.2f deg | last reset: %.2f deg",
             aimLastMoveDegrees,aimLastResetDegrees),
         string.format("Camera stabilization: %s | corrections: %d | conflicts: %d | errors: %d",
@@ -2819,6 +2825,9 @@ local function report()
         "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
         "Aim RMB setting: "..tostring(state.aimHoldRmb).." | "..getAimGateDiagnostics(),
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
+        "Relative mouse writes: "..aimMetrics.mouseWrites
+            .." | mouse API failures: "..aimMetrics.mouseErrors
+            .." | target switches: "..aimMetrics.targetSwitches,
         getRecoilReport(),
         Movement.report(),
         "Aim last active: "..aimLastActiveStatus,
@@ -3074,6 +3083,7 @@ local function launchSpectraUI()
     toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
     toggle(aimPage,"Hold right mouse","Aim only while holding right mouse button","aimHoldRmb")
     toggle(aimPage,"Visibility check","Only aim at unobstructed targets","aimVisibleOnly")
+    toggle(aimPage,"Sticky targets","Prefer the previous enemy to reduce rapid target switching","aimSticky")
     local aimPointButton
     aimPointButton=action(aimPage,"Aim point: Head",function()
         local order={"Head","Chest","Center"}
@@ -3100,7 +3110,36 @@ local function launchSpectraUI()
         aimMethodButton.Text="Aim method: "..state.aimMethod
         log("INFO","Aimbot method: "..state.aimMethod)
     end)
-    row(aimPage,"Runtime compatibility","Auto stabilizes Scriptable camera. Visual correction only; weapon unverified")
+    row(aimPage,"Runtime compatibility","Auto uses relative input on Scriptable cameras when exposed; otherwise camera fallback. Weapon direction unverified.")
+    groupLabel(aimPage,"AIMBOT DIAGNOSTICS")
+    action(aimPage,"Print Aimbot diagnostics to Roblox logs",function()
+        local camera=Workspace.CurrentCamera
+        print("[SPECTRA AIM] BEGIN")
+        print("[SPECTRA AIM] SPECTRA v"..VERSION
+            .." | PlaceId: "..tostring(game.PlaceId))
+        print("[SPECTRA AIM] Camera: "..(camera and camera.CameraType.Name or "missing")
+            .." | relative mouse API: "..(aimMouseMove and "available" or "unavailable")
+            .." | selected method: "..state.aimMethod)
+        print("[SPECTRA AIM] Discovery: "..lastSource
+            .." | target models: "..#targets.." | "..lastScanDetails)
+        print("[SPECTRA AIM] Team calibration: "..calibrationMode
+            .." | "..calibrationMessage)
+        for _,entry in ipairs(getInputDiagnosticsLines()) do
+            if entry:find("Aimbot",1,true)
+                or entry:find("Aim ",1,true)
+                or entry:find("Aim:",1,true)
+                or entry:find("Target checks",1,true)
+                or entry:find("Last GAMEPLAY",1,true)
+                or entry:find("CameraType:",1,true)
+                or entry:find("Hold-RMB",1,true)
+                or entry:find("Target switches",1,true)
+                or entry:find("Camera stabilization",1,true) then
+                print("[SPECTRA AIM] "..entry)
+            end
+        end
+        print("[SPECTRA AIM] END")
+        log("INFO","Aimbot report printed with [SPECTRA AIM] prefix")
+    end)
     groupLabel(aimPage,"STATUS")
     local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
     aimStatusText.Size=UDim2.new(1,-3,0,24)
