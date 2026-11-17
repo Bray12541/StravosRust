@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.9.2
+    SPECTRA / PHASE 1                         v1.9.3
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.9.2"
+local VERSION = "1.9.3"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1560,7 +1560,8 @@ end
 
 -- MOVEMENT MODIFIERS: verified self-rig only.
 -- Private function scope avoids exhausting Luau main-chunk local registers.
-local Movement = (function()     A custom game controller
+local Movement = (function()
+    -- A custom game controller
     -- can reject every local property write; never manipulate unidentified rigs.
     local movement={
         model=nil,root=nil,humanoid=nil,status="No verified local character",source="none",
@@ -2173,7 +2174,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.2",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.3",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2732,7 +2733,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.9.2 loaded. Scoped UI and movement startup to reduce Luau register use | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.9.3 loaded. Fixed movement module syntax | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial scan",discoverTargets)
