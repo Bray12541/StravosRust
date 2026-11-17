@@ -542,7 +542,7 @@ local function calibrateEnemyFromCrosshair()
         group = nil
         local root = Workspace:FindFirstChild("Players")
         local bestScore, secondScore = math.huge, math.huge
-        local bestGroup = nil
+        local bestGroup, secondGroup = nil, nil
         local checked = 0
         local obstructionDistance = result and (result.Position-ray.Origin).Magnitude or MAX_DISTANCE
         if root then
@@ -567,12 +567,22 @@ local function calibrateEnemyFromCrosshair()
                                     local pxDist = (Vector2.new(projected.X,projected.Y)-Vector2.new(size.X/2,size.Y/2)).Magnitude
                                     if pxDist <= 55 then
                                         local score = pxDist + distance*0.003
-                                        if score < bestScore then
-                                            secondScore = bestScore
-                                            bestScore = score
-                                            bestGroup = getTeamGroup(object)
-                                        elseif score < secondScore then
-                                            secondScore = score
+                                        local candidateGroup = getTeamGroup(object)
+                                        if candidateGroup then
+                                            if candidateGroup == bestGroup then
+                                                bestScore = math.min(bestScore, score)
+                                            elseif candidateGroup == secondGroup then
+                                                secondScore = math.min(secondScore, score)
+                                                if secondScore < bestScore then
+                                                    bestScore, secondScore = secondScore, bestScore
+                                                    bestGroup, secondGroup = secondGroup, bestGroup
+                                                end
+                                            elseif score < bestScore then
+                                                secondScore, secondGroup = bestScore, bestGroup
+                                                bestScore, bestGroup = score, candidateGroup
+                                            elseif score < secondScore then
+                                                secondScore, secondGroup = score, candidateGroup
+                                            end
                                         end
                                     end
                                 end
