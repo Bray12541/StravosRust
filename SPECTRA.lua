@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.11.4
+    SPECTRA / PHASE 1                         v1.12.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.11.4"
+local VERSION = "1.12.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1564,7 +1564,10 @@ end
 -- Pending/confirmed models are never persisted and expire on camera or rig
 -- changes, remote ownership matches, or a conflicting Player.Character.
 local SelfCalibration=(function()
-    local cal={pending=nil,active=nil,status="No session calibration",rearmRequested=false}
+    local cal={
+        pending=nil,active=nil,status="Watching for first spawn",
+        rearmRequested=false,initialCaptureArmed=true
+    }
     local function currentContext()
         local camera=Workspace.CurrentCamera
         local subject=camera and camera.CameraSubject
@@ -1613,16 +1616,24 @@ local SelfCalibration=(function()
         local hadPending=cal.pending~=nil
         cal.pending=nil
         cal.active=nil
+        -- Stop persistent flight attempts when a life ends. A server-side
+        -- rejection cannot be circumvented by continued local velocity writes.
+        if wasActive and state.fly then
+            state.fly=false
+            refreshAllToggles()
+            log("WARN","Fly automatically disabled after camera/character loss. Server acceptance of flight is not verified.")
+        end
         if reason=="Cleared by user" or reason=="SPECTRA unloaded"
             or reason=="New observation started" then
             cal.rearmRequested=false
+            cal.initialCaptureArmed=false
         elseif wasActive then
             -- Previous confirmed model changed. Gather evidence again;
             -- never transfer its confirmation to a new model.
             cal.rearmRequested=true
         end
         cal.status=cal.rearmRequested
-            and "Redeploy detected: walk with WASD for automatic 6s recheck, then confirm in Compat"
+            and "Redeploy detected: walk briefly for automatic 3s check, then confirm in Compat"
             or "Not calibrated: "..tostring(reason or "cleared")
         if wasActive or hadPending then
             print("[SPECTRA CAL] "..cal.status)
@@ -1631,8 +1642,8 @@ local SelfCalibration=(function()
     local function offer(observation)
         cal.pending=nil
         if not observation or observation.changedSubject~=0
-            or observation.samplesWithInput<12 or observation.motionAndInput<10
-            or observation.secondsWithInput<2 or observation.rootPath<15 then
+            or observation.samplesWithInput<9 or observation.motionAndInput<8
+            or observation.secondsWithInput<1.5 or observation.rootPath<12 then
             cal.status="No eligible candidate: insufficient stable input/motion evidence"
             return false
         end
@@ -1655,11 +1666,11 @@ local SelfCalibration=(function()
     local function confirm()
         local p=cal.pending
         if not p then
-            log("WARN","No calibrated candidate. Run the 10s WASD observation first.")
+            log("WARN","No candidate. Move with WASD for the automatic 3-second check, then confirm.")
             return false
         end
         if os.clock()-p.time>60 then
-            clear("Candidate expired; rerun 10s observation")
+            clear("Candidate expired; repeat the short movement observation")
             return false
         end
         local ok,reason=verifyContext(p)
@@ -1667,6 +1678,7 @@ local SelfCalibration=(function()
         cal.active=p
         cal.pending=nil
         cal.rearmRequested=false
+        cal.initialCaptureArmed=false
         cal.status="SESSION-CONFIRMED camera-followed model "..p.model.Name
             .." (ownership NOT verified; client-only attempts)"
         print("[SPECTRA CAL] "..cal.status)
@@ -1683,7 +1695,8 @@ local SelfCalibration=(function()
         return validate() and model~=nil and model==cal.active.model
     end
     local function readyForRearm()
-        if not cal.rearmRequested or cal.active or cal.pending then return false end
+        if not (cal.rearmRequested or cal.initialCaptureArmed)
+            or cal.active or cal.pending then return false end
         local camera,subject,model,root=currentContext()
         if not camera or not subject or not subject:IsA("Humanoid")
             or not model or not root then return false end
@@ -1692,6 +1705,7 @@ local SelfCalibration=(function()
     end
     local function markRearmStarted()
         cal.rearmRequested=false
+        cal.initialCaptureArmed=false
     end
     local function status()
         if cal.active then validate() end
@@ -2062,7 +2076,7 @@ local Movement = (function()
         local old=movement.originalHum
         if h and old then
             if state.speedHack then
-                h.WalkSpeed=state.speedValue;movement.writes.speed+=1
+                h.WalkSpeed=math.clamp(state.speedValue,16,50);movement.writes.speed+=1
             else h.WalkSpeed=old.walk end
             if state.highJump then
                 h.UseJumpPower=true;h.JumpPower=state.jumpPower
@@ -2094,7 +2108,7 @@ local Movement = (function()
         elseif state.speedHack and dir.Magnitude>0 then
             -- Custom rigs may expose a Humanoid while their movement speed is
             -- driven by another controller. Apply owned-body velocity too.
-            root.AssemblyLinearVelocity=Vector3.new(dir.X*state.speedValue,v.Y,dir.Z*state.speedValue)
+            root.AssemblyLinearVelocity=Vector3.new(dir.X*math.clamp(state.speedValue,16,50),v.Y,dir.Z*math.clamp(state.speedValue,16,50))
             movement.writes.speed+=1
         end
         if state.bunnyHop and not state.fly and dir.Magnitude>0
@@ -2191,7 +2205,7 @@ local Compat=(function()
             log("INFO","A compatibility capture is already running")
             return
         end
-        local redeployCheck=mode=="redeploy"
+        local automaticCheck=mode=="redeploy" or mode=="initial"
         -- Do not let an earlier, unverified candidate remain authorized
         -- while a fresh capture examines a potentially different model.
         if SelfCalibration.active or SelfCalibration.pending then
@@ -2200,9 +2214,9 @@ local Compat=(function()
             Movement.data.humanoid=nil;Movement.data.source="none"
             SelfCalibration.clear("New observation started")
         end
-        if redeployCheck then SelfCalibration.markRearmStarted() end
+        if automaticCheck then SelfCalibration.markRearmStarted() end
         compat.observation={
-            duration=redeployCheck and 6 or 10,
+            duration=3,
             elapsed=0,accumulated=0,secondsWithInput=0,samples=0,
             samplesWithInput=0,samplesWithMotion=0,
             motionAndInput=0,changedSubject=0,
@@ -2210,11 +2224,11 @@ local Compat=(function()
             previousRoot=nil,previousCamera=nil,subject=nil,
             previousSubject=nil
         }
-        compat.lastObservation=(redeployCheck and "Redeploy recheck" or "Manual recheck")
-            ..": recording movement input and camera-followed model."
-        log("INFO",redeployCheck
-            and "New character: automatic read-only 6s observation started. Continue walking; confirmation still required."
-            or "Read-only 10-second observation started. Close menu and walk with WASD; no gameplay changes made.")
+        compat.lastObservation=(automaticCheck and "Automatic character recheck" or "Manual recheck")
+            ..": recording 3 seconds of movement input and camera-followed model."
+        log("INFO",automaticCheck
+            and "Automatic read-only 3s movement check started. Continue walking; confirmation still required."
+            or "Read-only 3-second movement observation started. Close menu and walk with WASD.")
     end
     local function sampleObservation(dt)
         local c=compat.observation
@@ -2222,7 +2236,7 @@ local Compat=(function()
             -- Resume evidence collection on an actual moving new Humanoid,
             -- but never silently confirm a new or spectated model.
             if SelfCalibration.readyForRearm() and observationKeyDown() then
-                startObservation("redeploy")
+                startObservation(SelfCalibration.initialCaptureArmed and "initial" or "redeploy")
             end
             return
         end
@@ -2488,6 +2502,7 @@ local Compat=(function()
         line("[OPT-IN MOVEMENT OBSERVATION]")
         line(compat.lastObservation)
         line("An input/motion correlation does not establish identity or server-controlled abilities.")
+        line("Fly resets OFF after a character switch; server-side return to menu cannot be prevented by local code.")
         line("")
         line("[CAMERA & INPUT]")
         line("CurrentCamera exists: "..bool(camera~=nil))
@@ -2876,7 +2891,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.4",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.12.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3096,8 +3111,8 @@ local function launchSpectraUI()
 
     groupLabel(modifiersPage,"MOVEMENT")
     toggle(modifiersPage,"Speed Hack","Local speed changes; server can reset movement","speedHack")
-    settingSlider(modifiersPage,"Speed","Movement speed in studs per second","speedValue",16,120,4,"")
-    toggle(modifiersPage,"Fly","WASD movement, Space up, Ctrl down","fly")
+    settingSlider(modifiersPage,"Speed","Limited to 50 studs/s to avoid observed choppiness","speedValue",16,50,2,"")
+    toggle(modifiersPage,"Fly","Experimental: server may reset deployment; auto-OFF on character change","fly")
     settingSlider(modifiersPage,"Fly speed","Target flight speed","flySpeed",15,120,5,"")
     toggle(modifiersPage,"Noclip","Turns off collisions on your verified character","noclip")
     toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
@@ -3163,7 +3178,7 @@ local function launchSpectraUI()
         Compat.emit()
         log("INFO","Compatibility snapshot printed with [SPECTRA COMPAT] prefix")
     end)
-    action(compatPage,"Start 10s WASD + camera motion observation",Compat.startObservation)
+    action(compatPage,"Start 3s WASD + camera motion observation",Compat.startObservation)
     action(compatPage,"Confirm tracked model for this session",SelfCalibration.confirm)
     action(compatPage,"Clear session character calibration",function()
         Movement.restore()
@@ -3172,8 +3187,8 @@ local function launchSpectraUI()
     end)
     action(compatPage,"Copy compatibility report",Compat.copy)
     row(compatPage,"Safety note","Confirmation is not ownership proof; spectator targets remain possible")
-    row(compatPage,"Redeploy recovery","After a confirmed life ends, walk to auto-scan; click Confirm again")
-    row(compatPage,"How to use","Manual first-life observation or automatic 6s redeploy recheck")
+    row(compatPage,"Redeploy recovery","Walk for ~3s after spawn/redeploy, then click Confirm once")
+    row(compatPage,"How to use","Automatic 3s check on first spawn and redeploy; confirmation is manual")
     local compatReportView=create("TextBox",{
         Text=Compat.text,TextEditable=false,MultiLine=true,ClearTextOnFocus=false,
         Font=Enum.Font.Code,TextSize=10,TextWrapped=true,
@@ -3520,7 +3535,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.11.4 loaded. Redeploy recheck, immediate confirmed-rig reacquisition, explicit confirmation")
+    log("INFO","SPECTRA Phase 1 v1.12.0 loaded. 50 speed cap, automatic 3s spawn check, flight reset on character loss")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
