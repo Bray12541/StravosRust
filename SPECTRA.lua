@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.3.2
+    SPECTRA / PHASE 1                         v1.4.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.3.2"
+local VERSION = "1.4.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -164,14 +164,48 @@ local function isTeammate(player)
 end
 -- Only treat an anonymous Workspace model as an enemy if its parent group
 -- or its own metadata explicitly identifies a real opposing Roblox Team.
+local calibratedEnemyGroup = nil
+local calibrationMessage = "Not calibrated - aim at a visible enemy and press F6"
+local watchedRoot = nil
+local watcherConnections = {}
+local scanDirty = false
+local groupEvents = 0
+local function getTeamGroup(object)
+    local root = Workspace:FindFirstChild("Players")
+    if not root or not object then return nil end
+    local current = object
+    while current and current ~= root do
+        if current.Parent == root and current:IsA("Folder") then
+            return current
+        end
+        current = current.Parent
+    end
+    return nil
+end
+local function clearCalibration()
+    calibratedEnemyGroup = nil
+    calibrationMessage = "Not calibrated - aim at a visible enemy and press F6"
+    scanDirty = true
+    scanAccumulator = 10
+end
+-- Native Player.Team is absent in this game. A manually confirmed opposing
+-- Workspace.Players group can still be classified without trusting random rig names.
 local function getGroupRelation(model)
+    local group = getTeamGroup(model)
+    local root = Workspace:FindFirstChild("Players")
+    if calibratedEnemyGroup then
+        if not root or calibratedEnemyGroup.Parent ~= root then
+            clearCalibration()
+            calibrationMessage = "Groups changed - calibrate again with F6"
+        elseif group then
+            return group == calibratedEnemyGroup and "enemy" or "ally"
+        end
+    end
     local mine = LocalPlayer.Team
     if not mine then return "unknown" end
-    local group = model
-    for _ = 1, 4 do
-        if not group or group == Workspace then break end
-        -- Test each candidate separately; ipairs({nil, ...}) would skip
-        -- later metadata and miss otherwise valid team folder names.
+    local current = model
+    for _ = 1, 5 do
+        if not current or current == Workspace then break end
         local function matchTeam(candidate)
             if typeof(candidate) ~= "string" or candidate == "" then return nil end
             local team = TeamsService:FindFirstChild(candidate)
@@ -181,12 +215,12 @@ local function getGroupRelation(model)
             return nil
         end
         for _, field in ipairs({"Team", "TeamName", "TeamId"}) do
-            local relation = matchTeam(group:GetAttribute(field))
+            local relation = matchTeam(current:GetAttribute(field))
             if relation then return relation end
         end
-        local relation = matchTeam(group.Name)
+        local relation = matchTeam(current.Name)
         if relation then return relation end
-        group = group.Parent
+        current = current.Parent
     end
     return "unknown"
 end
@@ -368,7 +402,14 @@ local function discoverTargets()
         local ok, root = validModel(model)
         if not ok then rejected += 1; return end
 
-        local relation = player and getPlayerRelation(player) or getGroupRelation(model)
+        local playerRelation = player and getPlayerRelation(player) or "unknown"
+        local groupRelation = getGroupRelation(model)
+        local relation = "unknown"
+        if playerRelation == "ally" or groupRelation == "ally" then
+            relation = "ally"
+        elseif playerRelation == "enemy" or groupRelation == "enemy" then
+            relation = "enemy"
+        end
         if relation == "ally" then
             excluded += 1
             return
@@ -440,6 +481,77 @@ local function discoverTargets()
     if #targets == 0 and #samples > 0 then
         lastScanDetails ..= " samples: " .. table.concat(samples, ", ")
     end
+end
+
+-- Player folders may stream in/out or rebuild after a new round.
+-- Coalesce descendant changes into a single bounded discovery pass.
+local function watchPlayerFolder()
+    local root = Workspace:FindFirstChild("Players")
+    if watchedRoot == root then return end
+    for _, connection in ipairs(watcherConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(watcherConnections)
+    watchedRoot = root
+    scanDirty = true
+    scanAccumulator = 10
+    if not root then return end
+    local function invalidate(object)
+        if object:IsA("Model") or object:IsA("Folder") or object:IsA("BasePart") then
+            groupEvents += 1
+            scanDirty = true
+        end
+    end
+    watcherConnections[#watcherConnections+1] = root.DescendantAdded:Connect(invalidate)
+    watcherConnections[#watcherConnections+1] = root.DescendantRemoving:Connect(invalidate)
+end
+
+-- Only the user can confirm the opposing team when native Team data is absent.
+-- This calibration reads the visible object under the crosshair without
+-- editing any gameplay instances.
+local function calibrateEnemyFromCrosshair()
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        log("WARN","Cannot calibrate: no camera")
+        return
+    end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {camera}
+    local size = camera.ViewportSize
+    local ray = camera:ViewportPointToRay(size.X/2,size.Y/2)
+    local result = Workspace:Raycast(ray.Origin,ray.Direction*MAX_DISTANCE,params)
+    if not result then
+        log("WARN","Calibration missed: aim directly at a visible enemy rig, then press F6")
+        return
+    end
+    local part = result.Instance
+    local group = getTeamGroup(part)
+    if not group then
+        log("WARN","Calibration hit non-player geometry. Aim at a visible enemy body, not a wall.")
+        return
+    end
+    local current, foundRig = part, false
+    while current and current ~= group do
+        if current:IsA("Model") then
+            local ok = validModel(current)
+            if ok then
+                foundRig = true
+                break
+            end
+        end
+        current = current.Parent
+    end
+    if not foundRig then
+        log("WARN","Calibration hit a group object but no valid player rig. Try aiming at their torso.")
+        return
+    end
+    calibratedEnemyGroup = group
+    calibrationMessage = "Enemy group selected (F6); other groups excluded"
+    scanDirty = true
+    scanAccumulator = 10
+    log("INFO","Calibrated opposing team group. Other groups are excluded. Recalibrate if teams change.")
+    safeCall("Recheck calibrated player models", discoverTargets)
 end
 
 local function projectBox(camera, model)
@@ -526,8 +638,12 @@ local function render()
     for _, t in ipairs(targets) do
         local model = t.model
         local w = widgets[model]
+        local playerRelation = t.player and getPlayerRelation(t.player) or "unknown"
+        local groupRelation = getGroupRelation(model)
+        local isEnemy = (playerRelation == "enemy" or groupRelation == "enemy")
+            and playerRelation ~= "ally" and groupRelation ~= "ally"
         local shouldShow = model.Parent ~= nil and t.root and t.root.Parent ~= nil
-            and t.relation == "enemy" and (not t.player or getPlayerRelation(t.player) == "enemy")
+            and isEnemy
         local distance = 0
         if shouldShow then
             distance = (camera.CFrame.Position - t.root.Position).Magnitude
@@ -666,6 +782,8 @@ local function report()
         "Options: boxes="..tostring(state.boxes).." skeleton="..tostring(state.skeleton).." highlights="..tostring(state.highlights),
         "Enemy-only tracking: "..tostring(stats.teammates).." allies excluded; unknown teams: "..tostring(stats.unknownTeams),
         "Group-matched enemy rigs: "..tostring(stats.enemyGroups).." (only when Roblox Team names match)",
+        "Calibration: "..calibrationMessage,
+        "Group events observed: "..tostring(groupEvents),
         "Fixed limits: 1000 studs / 50 Hz target",
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.matched),
         "No getgc, hooks, remote scripts, or writes to other character models.",
@@ -693,7 +811,10 @@ local function shutdown()
     alive=false
     for key in pairs(widgets) do destroyWidget(key) end
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
+    for _, conn in ipairs(watcherConnections) do pcall(function() conn:Disconnect() end) end
+    table.clear(watcherConnections)
     table.clear(connections)
+    calibratedEnemyGroup = nil
     if overlayGui then overlayGui:Destroy(); overlayGui=nil end
     if menuGui then menuGui:Destroy(); menuGui=nil end
     targets={}
@@ -719,7 +840,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.3.2",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.4.0",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -823,7 +944,7 @@ local function action(page,label,callback)
 end
 
 local espPage=pages.ESP
-header(espPage,"Player visuals","Enemy team only · missing team data never renders")
+header(espPage,"Player visuals","Enemy-group calibration · read-only overlay")
 groupLabel(espPage,"DISPLAY")
 toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
 toggle(espPage,"2D boxes","Screen-space rectangles around verified characters","boxes")
@@ -831,8 +952,18 @@ toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
 toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
 toggle(espPage,"Skeleton","Uses rig Motor6D joints, Bones, or standard limbs where present","skeleton")
 toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
+groupLabel(espPage,"ENEMY IDENTIFICATION")
+row(espPage,"F6 - Calibrate enemy team","Aim at a visible enemy torso, then press F6")
+local calibrationInfo = textLabel(espPage,"Not calibrated",11,C.muted)
+calibrationInfo.Size = UDim2.new(1,-3,0,26)
+calibrationInfo.TextWrapped = true
+action(espPage,"Clear team calibration",function()
+    clearCalibration()
+    log("INFO","Enemy-group calibration cleared")
+    discoverTargets()
+end)
 groupLabel(espPage,"FIXED RULES")
-row(espPage,"Teammates excluded","Unknown-team models hidden until team can be verified")
+row(espPage,"Teammates excluded","Only calibrated enemy group or verified enemy team renders")
 row(espPage,"1000 studs · 50 Hz","Hardcoded range and marker refresh target")
 
 local colorButton
@@ -916,18 +1047,22 @@ local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=1
 round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, probe, sources, targets, recenter, esp on, esp off, clear, unload")
+    if input=="help" then log("INFO","Commands: help, status, probe, sources, team, calibrate, clearteam, targets, recenter, esp on, esp off, clear, unload")
     elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
     elseif input=="sources" then
         local sourceLines=inspectDataSources()
         for _, entry in ipairs(sourceLines) do log("INFO",entry) end
+    elseif input=="team" then
+        log("INFO","Calibration: "..calibrationMessage.." | events="..groupEvents)
+    elseif input=="calibrate" then calibrateEnemyFromCrosshair()
+    elseif input=="clearteam" then clearCalibration();discoverTargets();log("INFO","Calibration cleared")
     elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
     elseif input=="targets" then
         log("INFO","Candidates: "..#targets.."  verified="..stats.matched.." unverified="..stats.anonymous)
         for i=1,math.min(12,#targets) do
             local t=targets[i]
-            log("INFO",string.format("%d) %s [%s, %s]",i,t.label,t.source,t.player and "verified" or "unverified"))
+            log("INFO",string.format("%d) %s [%s, %s]",i,t.player and t.player.Name or "calibrated enemy rig",t.source,t.player and "verified" or "group-only"))
         end
     elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
     elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
@@ -963,6 +1098,8 @@ connect(UserInputService.InputBegan,function(input,gameProcessed)
     if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
         shutdown()
         return
+    elseif input.KeyCode==Enum.KeyCode.F6 then
+        safeCall("Enemy calibration",calibrateEnemyFromCrosshair)
     elseif input.KeyCode==Enum.KeyCode.RightShift then
         window.Visible=not window.Visible
         if window.Visible then clampWindow(false) end
@@ -979,8 +1116,9 @@ connect(RunService.RenderStepped,function(dt)
     scanAccumulator += dt
     renderAccumulator += dt
     statAccumulator += dt
-    if scanAccumulator >= 2.2 then
+    if scanAccumulator >= 2.2 or (scanDirty and scanAccumulator >= 0.2) then
         scanAccumulator = 0
+        scanDirty = false
         safeCall("Discover",discoverTargets)
     end
     if renderAccumulator >= UPDATE_PERIOD then
@@ -992,21 +1130,31 @@ connect(RunService.RenderStepped,function(dt)
         if statusText and statusText.Parent then
             statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
+        if calibrationInfo and calibrationInfo.Parent then
+            calibrationInfo.Text=calibrationMessage
+        end
         clampWindow(false)
         if debugSummary and debugSummary.Parent then
             debugSummary.Text=string.format("%s\n%s   |   render target %d Hz",lastSource,lastScanDetails,UPDATE_HZ)
         end
     end
 end)
-connect(Players.PlayerAdded,function(p) log("INFO","Player joined: "..p.Name);scanAccumulator=10 end)
-connect(Players.PlayerRemoving,function(p) log("INFO","Player left: "..p.Name);scanAccumulator=10 end)
+connect(Players.PlayerAdded,function(p) log("INFO","Player joined: "..p.Name);scanDirty=true end)
+connect(Players.PlayerRemoving,function(p) log("INFO","Player left: "..p.Name);scanDirty=true end)
+connect(Workspace.ChildAdded,function(child)
+    if child.Name == "Players" then watchPlayerFolder() end
+end)
+connect(Workspace.ChildRemoved,function(child)
+    if child == watchedRoot then watchPlayerFolder() end
+end)
 connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     for _,w in pairs(widgets) do if w.highlight then w.highlight:Destroy();w.highlight=nil end end
     clampWindow(false)
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.3.2 loaded. Right Shift: hide/show | F8: debug | Ctrl+End: unload")
-log("INFO","Enemy-only tracking; unknown team/owner models are excluded, diagnostics show the reason")
+log("INFO","SPECTRA Phase 1 v1.4 loaded. Right Shift: menu | F6: calibrate enemy group | F8: debug | Ctrl+End: unload")
+log("INFO","No Roblox teams found? Aim at a visible enemy and press F6 to identify their group. Unknown groups stay hidden.")
+watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
