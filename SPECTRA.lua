@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.14.0
+    SPECTRA / PHASE 1                         v1.15.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.14.0"
+local VERSION = "1.15.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -84,13 +84,9 @@ local state = {
     aimSticky = true,
     aimPoint = "Head",
     aimMethod = "Auto",
-    noRecoil = false,
-    recoilStrength = 100,
     speedHack = false, speedValue = 32,
     infiniteJump = false,
-    highJump = false, jumpPower = 96,
-    bunnyHop = false, noFallDamage = false,
-    spinbot = false, spinRate = 300,
+    noFallDamage = false,
     antiAim = false,
     color = "Cyan"
 }
@@ -1439,149 +1435,6 @@ local function runAimbot(dt)
 end
 
 
--- MODIFIERS: EXPERIMENTAL CAMERA RECOIL COMPENSATION --------------------------
--- Estimates upward camera displacement while firing and attempts to reduce
--- it. This does not change weapon recoil, bullet spread, damage or hit logic.
--- Scriptable game cameras may overwrite these visual changes at any time.
-local recoilData={
-    active=false,anchorPitch=nil,held=false,lastStatus="Off",
-    writeAttempts=0,writeSuccess=0,writeErrors=0,callbacks=0,
-    suppressedDegrees=0,lastUpwardDegrees=0,fireFrames=0,
-    correctionCamera=nil,correctionConn=nil,guard=false,
-    correctionsThisFrame=0
-}
-
-local function getCameraPitch(cf)
-    return math.asin(math.clamp(cf.LookVector.Y,-1,1))
-end
-
-local function getRecoilReport()
-    return string.format(
-        "No Recoil: %s | strength: %d%% | %s\nCamera recoil adjustments: %d/%d | callback corrections: %d | errors: %d\nLast upward camera deviation: %.2f deg | cumulative attempted compensation: %.1f deg\nVisual-only compensation; weapon recoil and bullet spread are not modified.",
-        state.noRecoil and "ON" or "OFF",state.recoilStrength,recoilData.lastStatus,
-        recoilData.writeSuccess,recoilData.writeAttempts,recoilData.callbacks,
-        recoilData.writeErrors,recoilData.lastUpwardDegrees,recoilData.suppressedDegrees
-    )
-end
-
-local function detachRecoilCamera()
-    recoilData.active=false
-    recoilData.held=false
-    recoilData.anchorPitch=nil
-    if recoilData.correctionConn then
-        pcall(function() recoilData.correctionConn:Disconnect() end)
-        recoilData.correctionConn=nil
-    end
-    recoilData.correctionCamera=nil
-end
-
-local function compensateRecoilCamera(camera,fromEvent)
-    if not recoilData.active or not recoilData.anchorPitch or recoilData.guard then return end
-    if fromEvent and recoilData.correctionsThisFrame>=2 then return end
-    if not camera or camera~=Workspace.CurrentCamera then return end
-    local cf=camera.CFrame
-    local pitch=getCameraPitch(cf)
-    local upward=pitch-recoilData.anchorPitch
-    recoilData.lastUpwardDegrees=math.deg(math.max(0,upward))
-    if upward<=math.rad(0.08) then
-        if upward<0 then
-            -- Never force a camera that is already pitching down to look up.
-            recoilData.anchorPitch=pitch
-        end
-        return
-    end
-    local strength=math.clamp(state.recoilStrength/100,0,1)
-    if strength<=0 then return end
-    local compensatedPitch=pitch-upward*strength
-    local horizontal=Vector3.new(cf.LookVector.X,0,cf.LookVector.Z)
-    if horizontal.Magnitude<0.01 then return end
-    local flat=horizontal.Unit
-    local direction=Vector3.new(flat.X*math.cos(compensatedPitch),math.sin(compensatedPitch),flat.Z*math.cos(compensatedPitch))
-    recoilData.writeAttempts+=1
-    recoilData.guard=true
-    local ok,err=pcall(function()
-        camera.CFrame=CFrame.lookAt(cf.Position,cf.Position+direction)
-    end)
-    recoilData.guard=false
-    if ok then
-        recoilData.writeSuccess+=1
-        recoilData.suppressedDegrees+=math.deg(upward*strength)
-        if fromEvent then recoilData.callbacks+=1; recoilData.correctionsThisFrame+=1 end
-        recoilData.lastStatus="Compensating upward camera kick (experimental)"
-    else
-        recoilData.writeErrors+=1
-        recoilData.lastStatus="Camera modification failed"
-        if recoilData.writeErrors<=3 then
-            log("ERROR","Recoil compensation error: "..tostring(err))
-        end
-        recoilData.active=false
-    end
-end
-
-local function observeRecoilCamera(camera)
-    if recoilData.correctionCamera==camera then return end
-    detachRecoilCamera()
-    if not camera then return end
-    recoilData.correctionCamera=camera
-    recoilData.correctionConn=connect(camera:GetPropertyChangedSignal("CFrame"),function()
-        if alive and recoilData.active and not recoilData.guard and state.noRecoil
-            and not (window and window.Visible) and not pickerActive then
-            compensateRecoilCamera(camera,true)
-        end
-    end)
-end
-
-local function updateRecoilModifier()
-    recoilData.correctionsThisFrame=0
-    if not alive or not state.noRecoil then
-        recoilData.active=false
-        recoilData.held=false
-        recoilData.anchorPitch=nil
-        recoilData.lastStatus="Off"
-        return
-    end
-    local camera=Workspace.CurrentCamera
-    if not camera then
-        recoilData.active=false
-        recoilData.held=false
-        recoilData.lastStatus="No camera"
-        return
-    end
-    if (window and window.Visible) or pickerActive
-        or UserInputService:GetFocusedTextBox() then
-        recoilData.active=false
-        recoilData.held=false
-        recoilData.anchorPitch=nil
-        recoilData.lastStatus="Waiting for gameplay (menu open)"
-        return
-    end
-    local ok,mouseHeld=pcall(function()
-        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-    end)
-    if not ok then
-        recoilData.active=false
-        recoilData.lastStatus="Mouse button polling unavailable"
-        return
-    end
-    if not mouseHeld then
-        recoilData.active=false
-        recoilData.held=false
-        recoilData.anchorPitch=nil
-        recoilData.lastStatus="Waiting for left mouse (fire)"
-        return
-    end
-    observeRecoilCamera(camera)
-    if not recoilData.held then
-        recoilData.anchorPitch=getCameraPitch(camera.CFrame)
-        recoilData.held=true
-    end
-    recoilData.active=true
-    recoilData.fireFrames+=1
-    recoilData.lastStatus="Monitoring camera pitch while firing (experimental)"
-    compensateRecoilCamera(camera,false)
-end
-
-
 -- SESSION-ONLY CHARACTER CALIBRATION ------------------------------------------
 -- Automatic calibration after locally observed WASD and camera-followed rig
 -- movement correlate over a bounded 3-second window; NOT ownership proof.
@@ -1766,17 +1619,16 @@ local Movement = (function()
     -- can reject every local property write; never manipulate unidentified rigs.
     local movement={
         model=nil,root=nil,humanoid=nil,status="No verified local character",source="none",
-        saved=nil,lastScan=0,lastJump=0,lastHop=0,spinAngle=0,errors=0,
+        lastScan=0,lastJump=0,errors=0,
         lastProbe=nil,measuredSpeed=0,measuredVertical=0,
         spaceHeld=false,antiOffset=0,verifiedFrames=0,unavailableFrames=0,
         originalHum=nil,
-        writes={speed=0,jump=0,fall=0,tp=0,spin=0,anti=0}
+        writes={speed=0,jump=0,fall=0,anti=0}
     }
 
     local function movementHasModes()
         return state.speedHack or state.infiniteJump
-            or state.highJump or state.bunnyHop or state.noFallDamage
-            or state.spinbot or state.antiAim
+            or state.noFallDamage or state.antiAim
     end
 
     local function restoreMovement()
@@ -1791,10 +1643,6 @@ local Movement = (function()
         if old and old.h and old.h.Parent then
             pcall(function()
                 old.h.WalkSpeed=old.walk
-                old.h.JumpPower=old.jump
-                old.h.JumpHeight=old.height
-                old.h.UseJumpPower=old.useJump
-                old.h.PlatformStand=old.stand
             end)
         end
         movement.originalHum=nil
@@ -1932,67 +1780,20 @@ local Movement = (function()
         if not root then return end
         local v=root.AssemblyLinearVelocity
         if h then pcall(function() h.Jump=true;h:ChangeState(Enum.HumanoidStateType.Jumping) end) end
-        root.AssemblyLinearVelocity=Vector3.new(v.X,math.max(v.Y,state.highJump and state.jumpPower or 49),v.Z)
+        root.AssemblyLinearVelocity=Vector3.new(v.X,math.max(v.Y,49),v.Z)
         movement.writes.jump+=1
     end
 
     local function movementJumpRequested()
-        if not (state.infiniteJump or state.highJump) then return end
+        if not state.infiniteJump then return end
         if os.clock()-movement.lastJump<0.15 then return end
         local _,root,h=findMovementRig(false)
         if not root then return end
-        if state.infiniteJump or movementGrounded(root,h) then
+        if state.infiniteJump then
             movement.lastJump=os.clock()
             local ok=pcall(movementJump)
             if not ok then movement.errors+=1 end
         end
-    end
-
-    local function movementSavePosition()
-        local model=findMovementRig(true)
-        if not model then log("WARN",movement.status);return end
-        movement.saved=model:GetPivot()
-        log("INFO","Saved verified local position for teleport")
-    end
-
-    local function movementTeleport(target)
-        local model=findMovementRig(true)
-        if not model then log("WARN",movement.status);return end
-        if typeof(target)~="CFrame" then return end
-        if (target.Position-model:GetPivot().Position).Magnitude>5000 then
-            log("WARN","Teleport rejected: over 5000 studs");return
-        end
-        local ok,err=pcall(function() model:PivotTo(target) end)
-        if ok then
-            movement.writes.tp+=1
-            movement.status="Teleport attempted; server may restore position"
-            log("INFO","Teleport attempted on verified local rig")
-        else
-            movement.errors+=1
-            log("ERROR","Teleport error: "..tostring(err))
-        end
-    end
-
-    local function movementTeleportSaved()
-        if movement.saved then movementTeleport(movement.saved)
-        else log("WARN","No saved position; use Save position first") end
-    end
-
-    local function movementTeleportForward()
-        local model=findMovementRig(true)
-        local camera=Workspace.CurrentCamera
-        if not model or not camera then log("WARN",movement.status);return end
-        local dir=Vector3.new(camera.CFrame.LookVector.X,0,camera.CFrame.LookVector.Z)
-        if dir.Magnitude<0.1 then return end
-        dir=dir.Unit
-        local pivot=model:GetPivot()
-        local params=RaycastParams.new()
-        params.FilterType=Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances={model}
-        local hit=Workspace:Raycast(pivot.Position,dir*30,params)
-        local distance=hit and (hit.Position-pivot.Position).Magnitude-4 or 30
-        if distance<2 then log("WARN","Forward teleport blocked");return end
-        movementTeleport(pivot+dir*distance)
     end
 
     local function movementProbe()
@@ -2049,22 +1850,19 @@ local Movement = (function()
             return name..": LOCAL ATTEMPT (server result unverified)"
         end
         return table.concat({
-            "Movement: "..movement.status.." | source="..movement.source.." | saved="..tostring(movement.saved~=nil),
+            "Movement: "..movement.status.." | source="..movement.source,
             "Session calibration: "..SelfCalibration.statusText(),
             status("Speed",state.speedHack),
             status("Infinite Jump",state.infiniteJump),
-            status("High Jump",state.highJump),
-            status("Bunny Hop",state.bunnyHop),
             status("No Fall Damage",state.noFallDamage),
-            status("Spinbot",state.spinbot),
             status("Anti Aim",state.antiAim),
             string.format("Measured root velocity: %.1f horizontal / %.1f vertical studs/s",movement.measuredSpeed,movement.measuredVertical),
             string.format("Frames with verified local rig: %d | unavailable checks: %d",movement.verifiedFrames,movement.unavailableFrames),
-            string.format("Write attempts: speed=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
-                w.speed,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
+            string.format("Write attempts: speed=%d jump=%d fall=%d anti=%d | errors=%d",
+                w.speed,w.jump,w.fall,w.anti,movement.errors),
             movement.lastProbe or "Probe: not run (use modprobe)",
             "Client camera movement cannot substitute for a missing local character.",
-            "Client-only writes cannot guarantee server-side fall-damage immunity, flight, teleport, or anti-aim."
+            "Client-only writes cannot guarantee server-side fall-damage immunity or anti-aim."
         },"\n")
     end
 
@@ -2084,7 +1882,7 @@ local Movement = (function()
                 or "Unavailable: no verified local character (movement modifiers off)"
             return
         end
-        if newSpacePress and (state.infiniteJump or state.highJump) then
+        if newSpacePress and state.infiniteJump then
             movementJumpRequested()
         end
         local model,root,h=findMovementRig(false)
@@ -2095,17 +1893,13 @@ local Movement = (function()
         movement.measuredSpeed=Vector3.new(measured.X,0,measured.Z).Magnitude
         movement.measuredVertical=measured.Y
         if h and not movement.originalHum then
-            movement.originalHum={h=h,walk=h.WalkSpeed,jump=h.JumpPower,
-                height=h.JumpHeight,useJump=h.UseJumpPower,stand=h.PlatformStand}
+            movement.originalHum={h=h,walk=h.WalkSpeed}
         end
         local old=movement.originalHum
         if h and old then
             if state.speedHack then
                 h.WalkSpeed=math.clamp(state.speedValue,16,50);movement.writes.speed+=1
             else h.WalkSpeed=old.walk end
-            if state.highJump then
-                h.UseJumpPower=true;h.JumpPower=state.jumpPower
-            else h.JumpPower=old.jump;h.JumpHeight=old.height;h.UseJumpPower=old.useJump end
         end
         local dir=movementDirection()
         local v=root.AssemblyLinearVelocity
@@ -2115,10 +1909,6 @@ local Movement = (function()
             root.AssemblyLinearVelocity=Vector3.new(dir.X*math.clamp(state.speedValue,16,50),v.Y,dir.Z*math.clamp(state.speedValue,16,50))
             movement.writes.speed+=1
         end
-        if state.bunnyHop and dir.Magnitude>0
-            and os.clock()-movement.lastHop>0.22 and movementGrounded(root,h) then
-            movement.lastHop=os.clock();movementJump()
-        end
         if state.noFallDamage then
             local fall=root.AssemblyLinearVelocity
             if fall.Y < -32 and movementGrounded(root,nil,7) then
@@ -2126,13 +1916,7 @@ local Movement = (function()
                 movement.writes.fall+=1
             end
         end
-        if state.spinbot then
-            -- Rotation relative to the current body heading avoids snapping
-            -- every frame to world yaw zero.
-            root.CFrame=root.CFrame*CFrame.Angles(0,math.rad(state.spinRate)*dt,0)
-            movement.writes.spin+=1
-            movement.antiOffset=0
-        elseif state.antiAim then
+        if state.antiAim then
             local wanted=math.sin(os.clock()*20)*math.rad(35)
             root.CFrame=root.CFrame*CFrame.Angles(0,wanted-movement.antiOffset,0)
             movement.antiOffset=wanted
@@ -2151,10 +1935,6 @@ local Movement = (function()
         report=movementReport,
         probe=movementProbe,
         find=findMovementRig,
-        save=movementSavePosition,
-        teleport=movementTeleport,
-        saved=movementTeleportSaved,
-        forward=movementTeleportForward,
         jumpRequested=movementJumpRequested,
         update=updateMovement,
     }
@@ -2541,15 +2321,14 @@ local Compat=(function()
         line("")
         line("[FEATURE CAPABILITY / EVIDENCE ONLY]")
         if not root or not candidate then
-            line("Speed / Jump / Teleport / Spin: UNAVAILABLE; no verified writable self-rig")
+            line("Speed / Jump / Anti Aim: UNAVAILABLE; no verified writable self-rig")
         elseif root.Anchored then
-            line("Speed / Jump / Teleport / Spin: RESTRICTED; root anchored")
+            line("Speed / Jump / Anti Aim: RESTRICTED; root anchored")
         else
             line("Movement modifiers: local BasePart exists; server-accepted effect NOT VERIFIED")
             line("Humanoid movement controls: "..(hum and "exposed" or "NOT EXPOSED"))
         end
         line("No Fall Damage: server authority not available from public client API")
-        line("No Recoil: only camera visual correction; weapon recoil/spread NOT VERIFIED")
         line("Aimbot: visible target data does not establish camera or weapon aim control")
         line("Anti Aim: client visual rotation does not establish server hitbox behavior")
         line("")
@@ -2694,7 +2473,6 @@ local function getInputDiagnosticsLines()
         string.format("Camera stabilization: %s | corrections: %d | conflicts: %d | errors: %d",
             aimCorrectionActive and "active" or "inactive",
             aimCorrectionCount,aimCorrectionObservations,aimCorrectionErrors),
-        getRecoilReport(),
         Movement.report(),
         "Mouse reports and camera writes do not prove weapon-aim control."
     }
@@ -2828,7 +2606,6 @@ local function report()
         "Relative mouse writes: "..aimMetrics.mouseWrites
             .." | mouse API failures: "..aimMetrics.mouseErrors
             .." | target switches: "..aimMetrics.targetSwitches,
-        getRecoilReport(),
         Movement.report(),
         "Aim last active: "..aimLastActiveStatus,
         "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
@@ -2869,7 +2646,6 @@ local function shutdown()
     alive=false
     pcall(function() RunService:UnbindFromRenderStep(AIM_RENDER_BIND) end)
     aimRmbHeld=false
-    detachRecoilCamera()
     Movement.restore()
     SelfCalibration.clear("SPECTRA unloaded")
     disableAimCorrection()
@@ -2920,7 +2696,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.14.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.15.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3155,38 +2931,14 @@ local function launchSpectraUI()
         log("INFO",Movement.data.status)
     end)
     row(modifiersPage,"Availability","Auto-calibrates after ~3s walking; server results unverified")
-    groupLabel(modifiersPage,"RECOIL")
-    toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
-    settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
-    row(modifiersPage,"Limitations","Camera-only adjustment; actual weapon recoil and spread unchanged")
-    groupLabel(modifiersPage,"STATUS")
-    local recoilStatusText=textLabel(modifiersPage,"Off",11,C.muted)
-    recoilStatusText.Size=UDim2.new(1,-3,0,42)
-    recoilStatusText.TextWrapped=true
-    groupLabel(modifiersPage,"NOTES")
-    local recoilNote=textLabel(modifiersPage,"Tests require holding fire with the menu hidden. If the game controls recoil separately from Camera.CFrame, no recoil reduction may be visible.",11,C.muted)
-    recoilNote.Size=UDim2.new(1,-3,0,52)
-    recoilNote.TextWrapped=true
-
     groupLabel(modifiersPage,"MOVEMENT")
     toggle(modifiersPage,"Speed Hack","Local speed changes; server can reset movement","speedHack")
     settingSlider(modifiersPage,"Speed","Limited to 50 studs/s to avoid observed choppiness","speedValue",16,50,2,"")
     toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
-    toggle(modifiersPage,"High Jump","Increases local jump impulse","highJump")
-    settingSlider(modifiersPage,"Jump power","Impulse for High Jump","jumpPower",48,160,4,"")
-    toggle(modifiersPage,"Bunny Hop","Automatically jumps when moving on ground","bunnyHop")
     toggle(modifiersPage,"No Fall Damage","Attempts to slow descent before landing","noFallDamage")
-    groupLabel(modifiersPage,"POSITION")
-    row(modifiersPage,"Teleport","Bookmark and move only your verified local character")
-    action(modifiersPage,"Save position",Movement.save)
-    action(modifiersPage,"Teleport to saved position",Movement.saved)
-    action(modifiersPage,"Teleport forward (max 30 studs)",Movement.forward)
-    groupLabel(modifiersPage,"ORIENTATION")
-    toggle(modifiersPage,"Spinbot","Rotates local character; may disturb movement","spinbot")
-    settingSlider(modifiersPage,"Spin rate","Degrees per second","spinRate",60,720,30," deg/s")
     toggle(modifiersPage,"Anti Aim (local visual)","Jitters local model; does NOT alter server hitbox","antiAim")
     groupLabel(modifiersPage,"SERVER LIMITATIONS")
-    row(modifiersPage,"Local only","The game can reject speed, flight, teleport, damage changes")
+    row(modifiersPage,"Local only","The game can reject speed or damage changes")
     action(modifiersPage,"Copy movement status",function()
         local text=Movement.report()
         if type(setclipboard)=="function" then
@@ -3344,7 +3096,7 @@ local function launchSpectraUI()
     round(run,5)
     local function runCommand(raw)
         local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, compatclear, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, compatclear, copycompat, inputdiag, modstatus, modprobe, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
         elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
             log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
         elseif input=="compat" then
@@ -3369,22 +3121,6 @@ local function launchSpectraUI()
         elseif input=="modprobe" then
             log("INFO",Movement.probe())
             log("INFO",Movement.data.status)
-        elseif input=="savepos" then Movement.save()
-        elseif input=="tpback" then Movement.saved()
-        elseif input=="tpforward" then Movement.forward()
-        elseif input:match("^tp%s+") then
-            local x,y,z=input:match("^tp%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)$")
-            x,y,z=tonumber(x),tonumber(y),tonumber(z)
-            if x and y and z and math.abs(x)<100000 and math.abs(y)<100000 and math.abs(z)<100000 then
-                local model=Movement.find(true)
-                if model then
-                    Movement.teleport(CFrame.new(x,y,z)*model:GetPivot().Rotation)
-                else log("WARN",Movement.data.status) end
-            else log("WARN","Use tp x y z with finite numeric coordinates") end
-        elseif input=="recoilstatus" then
-            for entry in getRecoilReport():gmatch("[^\n]+") do log("INFO",entry) end
-        elseif input=="norecoil on" then state.noRecoil=true;refreshAllToggles();log("INFO","Experimental camera recoil compensation enabled")
-        elseif input=="norecoil off" then state.noRecoil=false;refreshAllToggles();log("INFO","Camera recoil compensation disabled")
         elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
         elseif input=="sources" then
             local sourceLines=inspectDataSources()
@@ -3495,10 +3231,6 @@ local function launchSpectraUI()
             if aimStatusText and aimStatusText.Parent then
                 aimStatusText.Text=aimStatus
             end
-            if recoilStatusText and recoilStatusText.Parent then
-                recoilStatusText.Text=string.format("%s | %d writes | %.1f deg attempted",
-                    recoilData.lastStatus,recoilData.writeSuccess,recoilData.suppressedDegrees)
-            end
             if Movement.statusLabel and Movement.statusLabel.Parent then
                 Movement.statusLabel.Text=Movement.data.status.."\nSource: "..Movement.data.source
                     .." | errors: "..Movement.data.errors
@@ -3554,7 +3286,6 @@ local function launchSpectraUI()
         end
         aimObservedCamera=nil
         disableAimCorrection()
-        detachRecoilCamera()
         for _,w in pairs(widgets) do if w.highlight then w.highlight:Destroy();w.highlight=nil end end
         clampWindow(false)
         log("INFO","Camera changed; optional highlights reset")
@@ -3573,22 +3304,12 @@ local function launchSpectraUI()
                 aimLastGameplayTime=os.date("%H:%M:%S")
                 if aimErrors<=3 then log("ERROR","Aimbot update failed: "..tostring(err)) end
             end
-            -- Recoil camera compensation is a separate modifier and may run even
-            -- while aimbot is disabled. It never modifies weapon or network state.
-            local recoilOK,recoilError=pcall(updateRecoilModifier)
-            if not recoilOK then
-                recoilData.writeErrors+=1
-                recoilData.lastStatus="Modifier runtime error"
-                if recoilData.writeErrors<=3 then
-                    log("ERROR","Recoil modifier failed: "..tostring(recoilError))
-                end
-            end
         end)
     end)
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.14.0 loaded. Air-movement option removed; Aimbot target lock and aim-source diagnostics")
+    log("INFO","SPECTRA Phase 1 v1.15.0 loaded. Removed unused modifiers; focus on Aimbot")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
