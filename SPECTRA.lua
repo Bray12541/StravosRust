@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.17.0
+    SPECTRA / PHASE 1                         v1.18.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.17.0"
+local VERSION = "1.18.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1228,8 +1228,10 @@ local function getAimPositions(target)
     local points,seen={},{}
     local names={
         "Head","UpperTorso","Torso","Chest","Body","HumanoidRootPart",
-        "LeftUpperArm","RightUpperArm","LeftHand","RightHand",
-        "LeftUpperLeg","RightUpperLeg","LeftFoot","RightFoot"
+        "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
+        "LeftHand","RightHand","Left Arm","Right Arm",
+        "LowerTorso","LeftUpperLeg","RightUpperLeg","LeftLowerLeg","RightLowerLeg",
+        "LeftFoot","RightFoot","Left Leg","Right Leg"
     }
     local model=target.model
     for _,name in ipairs(names) do
@@ -1356,9 +1358,11 @@ local function aimActivationHeld()
         if ok then held=pressed end
         return held
     end
-    local code=key=="Left Alt" and Enum.KeyCode.LeftAlt
-        or key=="X" and Enum.KeyCode.X or nil
-    if not code then return false end
+    -- Support any valid keyboard key selected using the Aim Key binder.
+    -- Preserve "Left Alt" from older configurations for compatibility.
+    local name=key=="Left Alt" and "LeftAlt" or key
+    local valid,code=pcall(function() return Enum.KeyCode[name] end)
+    if not valid or not code then return false end
     local ok,pressed=pcall(function()
         return UserInputService:IsKeyDown(code)
     end)
@@ -2794,7 +2798,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.17.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.18.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2955,16 +2959,47 @@ local function launchSpectraUI()
     header(aimPage,"Aimbot","Snap toward projected enemy targets inside the FOV circle")
     groupLabel(aimPage,"TARGETING")
     toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
+    -- A real input binder instead of cycling through a short fixed key list.
+    -- MouseButton1 is deliberately not bindable because it confirms UI clicks.
+    local aimKeyCapture=false
     local aimKeyButton
-    aimKeyButton=action(aimPage,"Aim Key: Right Mouse",function()
-        local options={"Right Mouse","Left Alt","X","Always"}
-        local nextIndex=1
-        for i,v in ipairs(options) do
-            if state.aimKey==v then nextIndex=i%#options+1;break end
+    local function applyAimKey(key)
+        aimKeyCapture=false
+        state.aimKey=key
+        aimRmbHeld=false
+        table.clear(aimKeyHeld)
+        aimKeyButton.Text="Aim Key: "..key.." (click to rebind)"
+        log("INFO","Aimbot activation key: "..key)
+    end
+    aimKeyButton=action(aimPage,"Aim Key: Right Mouse (click to rebind)",function()
+        aimKeyCapture=true
+        aimKeyButton.Text="Press keyboard key or RMB (Esc cancels)"
+    end)
+    action(aimPage,"Aim Key: Always active",function()
+        applyAimKey("Always")
+    end)
+    connect(UserInputService.InputBegan,function(input)
+        if not aimKeyCapture then return end
+        if input.KeyCode==Enum.KeyCode.Escape then
+            aimKeyCapture=false
+            aimKeyButton.Text="Aim Key: "..state.aimKey.." (click to rebind)"
+            return
         end
-        state.aimKey=options[nextIndex]
-        aimKeyButton.Text="Aim Key: "..state.aimKey
-        log("INFO","Aimbot activation key: "..state.aimKey)
+        if input.UserInputType==Enum.UserInputType.MouseButton2 then
+            applyAimKey("Right Mouse")
+            return
+        end
+        if input.UserInputType~=Enum.UserInputType.Keyboard
+            or input.KeyCode==Enum.KeyCode.Unknown then return end
+        -- Avoid capturing keys reserved for SPECTRA controls or unloading.
+        local keyCode=input.KeyCode
+        if keyCode==Enum.KeyCode.RightShift or keyCode==Enum.KeyCode.F8
+            or keyCode==Enum.KeyCode.Home or keyCode==Enum.KeyCode.End then
+            log("WARN","This key is reserved by SPECTRA; choose another")
+            return
+        end
+        local key=keyCode==Enum.KeyCode.LeftAlt and "Left Alt" or keyCode.Name
+        applyAimKey(key)
     end)
     toggle(aimPage,"Visibility Check","Require clear line of sight (off = track behind cover)","aimVisibleOnly")
     toggle(aimPage,"Sticky targets","Prefer the previous enemy to reduce rapid target switching","aimSticky")
@@ -3301,16 +3336,20 @@ local function launchSpectraUI()
     connect(UserInputService.InputEnded,function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
         if input.UserInputType==Enum.UserInputType.MouseButton2 then aimRmbHeld=false end
-        if input.KeyCode==Enum.KeyCode.LeftAlt then aimKeyHeld["Left Alt"]=false end
-        if input.KeyCode==Enum.KeyCode.X then aimKeyHeld["X"]=false end
+        if input.UserInputType==Enum.UserInputType.Keyboard then
+            local key=input.KeyCode==Enum.KeyCode.LeftAlt and "Left Alt" or input.KeyCode.Name
+            aimKeyHeld[key]=false
+        end
     end)
     connect(UserInputService.InputBegan,function(input,gameProcessed)
         if input.UserInputType==Enum.UserInputType.MouseButton2 then
             aimRmbHeld=not (window and window.Visible) and not UserInputService:GetFocusedTextBox()
         end
         if not gameProcessed and not UserInputService:GetFocusedTextBox() then
-            if input.KeyCode==Enum.KeyCode.LeftAlt then aimKeyHeld["Left Alt"]=true end
-            if input.KeyCode==Enum.KeyCode.X then aimKeyHeld["X"]=true end
+            if input.UserInputType==Enum.UserInputType.Keyboard then
+                local key=input.KeyCode==Enum.KeyCode.LeftAlt and "Left Alt" or input.KeyCode.Name
+                aimKeyHeld[key]=true
+            end
         end
         if gameProcessed or UserInputService:GetFocusedTextBox() then return end
         if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
@@ -3436,7 +3475,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.17.0 loaded. Selectable Aim Key, Head/Chest/Nearest bones, FOV, smoothness and visibility settings")
+    log("INFO","SPECTRA Phase 1 v1.18.0 loaded. Bindable Aim Key, Head/Chest/Nearest bones, FOV, smoothness and visibility settings")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
