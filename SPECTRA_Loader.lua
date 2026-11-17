@@ -1,8 +1,8 @@
 -- SPECTRA loader: reject stale GitHub/raw cache responses.
 -- The pinned source is a guaranteed minimum build, not a separate update channel.
 local BRANCH_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/498af9f51fec286c4fea87d3a100b1a306bf87bd/SPECTRA.lua"
-local MINIMUM_VERSION = "1.7.5"
+local PINNED_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/3e17921694498e8135854f008a24a1ed1c63ca2b/SPECTRA.lua"
+local MINIMUM_VERSION = "1.7.6"
 
 if type(loadstring) ~= "function" then
     warn("[SPECTRA Loader] loadstring is unavailable")
