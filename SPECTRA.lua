@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.9.3
+    SPECTRA / PHASE 1                         v1.9.4
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.9.3"
+local VERSION = "1.9.4"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1566,6 +1566,7 @@ local Movement = (function()
     local movement={
         model=nil,root=nil,humanoid=nil,status="No verified local character",source="none",
         saved=nil,lastScan=0,lastJump=0,lastHop=0,spinAngle=0,errors=0,
+        lastProbe=nil,measuredSpeed=0,measuredVertical=0,
         originalHum=nil,collisions=setmetatable({},{__mode="k"}),
         writes={speed=0,fly=0,noclip=0,jump=0,fall=0,tp=0,spin=0,anti=0}
     }
@@ -1654,7 +1655,7 @@ local Movement = (function()
         if movement.model or movement.originalHum then restoreMovement() end
         movement.model=nil;movement.root=nil;movement.humanoid=nil
         movement.source="none"
-        movement.status="Unavailable: no positively identified local rig"
+        movement.status="Unavailable: no verified self-rig. Phantom Forces may keep movement in a custom controller"
         return nil,nil,nil
     end
 
@@ -1749,17 +1750,77 @@ local Movement = (function()
         movementTeleport(pivot+dir*distance)
     end
 
+    local function movementProbe()
+        local camera=Workspace.CurrentCamera
+        local subject=camera and camera.CameraSubject
+        local subjectText=subject and (subject.ClassName.."/"..subject.Name) or "nil"
+        local playerFolder=Workspace:FindFirstChild("Players")
+        local models,identifiable,localModels=0,0,0
+        local sample={}
+        if playerFolder then
+            local stack={{playerFolder,0}}
+            local n,checked=1,0
+            while n<=#stack and checked<350 do
+                local node,depth=stack[n][1],stack[n][2]
+                n+=1
+                for _,child in ipairs(node:GetChildren()) do
+                    checked+=1
+                    if checked>=350 then break end
+                    if child:IsA("Model") then
+                        models+=1
+                        local owner=identifyPlayer(child)
+                        if owner then
+                            identifiable+=1
+                            if owner==LocalPlayer then localModels+=1 end
+                        end
+                        if #sample<3 then
+                            sample[#sample+1]=child.Name.."/"..(owner and owner.Name or "anonymous")
+                        end
+                        if depth<2 then stack[#stack+1]={child,depth+1} end
+                    elseif child:IsA("Folder") and depth<3 then
+                        stack[#stack+1]={child,depth+1}
+                    end
+                end
+            end
+        end
+        local rig,root,h=findMovementRig(true)
+        local line=string.format(
+            "Local character: %s | CameraSubject: %s | Workspace.Players models: %d (identified: %d, local: %d) | resolved root: %s | Humanoid: %s",
+            tostring(LocalPlayer.Character~=nil),subjectText,models,identifiable,localModels,
+            root and root.Name or "none",tostring(h~=nil))
+        movement.lastProbe=line.." | samples="..(#sample>0 and table.concat(sample,", ") or "none")
+        return movement.lastProbe
+    end
+
     local function movementReport()
         local w=movement.writes
-        return string.format(
-            "Movement: %s | source=%s | saved=%s\nSpeed=%s Fly=%s Noclip=%s InfiniteJump=%s HighJump=%s BunnyHop=%s NoFallDamage=%s Spinbot=%s AntiAim=%s\n"..
-            "Write attempts: speed=%d fly=%d noclip=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d\n"..
-            "Client-side movement changes may be rejected or reset; no server immunity/hitbox changes.",
-            movement.status,movement.source,movement.saved and "yes" or "no",
-            tostring(state.speedHack),tostring(state.fly),tostring(state.noclip),
-            tostring(state.infiniteJump),tostring(state.highJump),tostring(state.bunnyHop),
-            tostring(state.noFallDamage),tostring(state.spinbot),tostring(state.antiAim),
-            w.speed,w.fly,w.noclip,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors)
+        local rigOK=movement.root and movement.root.Parent and movement.model and movement.model.Parent
+        local function status(name,enabled,dependency)
+            if not enabled then return name..": OFF" end
+            if not rigOK then return name..": UNAVAILABLE (no verified local character)" end
+            if dependency=="humanoid" and not movement.humanoid then
+                return name..": CUSTOM RIG (physics only; Humanoid API unavailable)"
+            end
+            return name..": LOCAL ATTEMPT (server result unverified)"
+        end
+        return table.concat({
+            "Movement: "..movement.status.." | source="..movement.source.." | saved="..tostring(movement.saved~=nil),
+            status("Speed",state.speedHack),
+            status("Fly",state.fly),
+            status("Noclip",state.noclip),
+            status("Infinite Jump",state.infiniteJump),
+            status("High Jump",state.highJump),
+            status("Bunny Hop",state.bunnyHop),
+            status("No Fall Damage",state.noFallDamage),
+            status("Spinbot",state.spinbot),
+            status("Anti Aim",state.antiAim),
+            string.format("Measured root velocity: %.1f horizontal / %.1f vertical studs/s",movement.measuredSpeed,movement.measuredVertical),
+            string.format("Write attempts: speed=%d fly=%d noclip=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
+                w.speed,w.fly,w.noclip,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
+            movement.lastProbe or "Probe: not run (use modprobe)",
+            "Client camera movement cannot substitute for a missing local character.",
+            "Client-only writes cannot guarantee server-side fall-damage immunity, flight, teleport, or anti-aim."
+        },"\n")
     end
 
     local function updateMovement(dt)
@@ -1772,6 +1833,9 @@ local Movement = (function()
         local model,root,h=findMovementRig(false)
         if not root then return end
         if root.Anchored then movement.status="Unavailable: local root anchored";return end
+        local measured=root.AssemblyLinearVelocity
+        movement.measuredSpeed=Vector3.new(measured.X,0,measured.Z).Magnitude
+        movement.measuredVertical=measured.Y
         if h and not movement.originalHum then
             movement.originalHum={h=h,walk=h.WalkSpeed,jump=h.JumpPower,
                 height=h.JumpHeight,useJump=h.UseJumpPower,stand=h.PlatformStand}
@@ -1843,6 +1907,7 @@ local Movement = (function()
         data=movement,
         restore=restoreMovement,
         report=movementReport,
+        probe=movementProbe,
         find=findMovementRig,
         save=movementSavePosition,
         teleport=movementTeleport,
@@ -2174,7 +2239,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.3",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.4",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2408,6 +2473,19 @@ local function launchSpectraUI()
     Movement.statusLabel.Size=UDim2.new(1,-3,0,57)
     Movement.statusLabel.TextWrapped=true
     row(modifiersPage,"Server limitations","Server can reject speed, flight, teleport, damage changes")
+    action(modifiersPage,"Identify local character (diagnose)",function()
+        log("INFO",Movement.probe())
+        log("INFO",Movement.data.status)
+    end)
+    action(modifiersPage,"Copy movement status",function()
+        local text=Movement.report()
+        if type(setclipboard)=="function" then
+            local ok=pcall(setclipboard,text)
+            if ok then log("INFO","Movement report copied");return end
+        end
+        print(text)
+        log("WARN","Clipboard unavailable; report printed to console")
+    end)
     local espPage=pages.ESP
     header(espPage,"Player visuals","Configure your in-game overlay")
     groupLabel(espPage,"DISPLAY")
@@ -2537,9 +2615,8 @@ local function launchSpectraUI()
         elseif input=="modstatus" then
             for entry in Movement.report():gmatch("[^\n]+") do log("INFO",entry) end
         elseif input=="modprobe" then
-            local model,root,h=Movement.find(true)
-            log("INFO","Local: "..Movement.data.status.." | model="..tostring(model and model.Name or "nil")
-                .." | root="..tostring(root and root.Name or "nil").." | humanoid="..tostring(h~=nil))
+            log("INFO",Movement.probe())
+            log("INFO",Movement.data.status)
         elseif input=="savepos" then Movement.save()
         elseif input=="tpback" then Movement.saved()
         elseif input=="tpforward" then Movement.forward()
@@ -2733,7 +2810,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.9.3 loaded. Fixed movement module syntax | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.9.4 loaded. Movement self-rig probe and feature availability | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial scan",discoverTargets)
