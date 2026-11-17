@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.4.1
+    SPECTRA / PHASE 1                         v1.5.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.4.1"
+local VERSION = "1.5.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -637,6 +637,144 @@ local function projectBox(camera, model)
     if w < 2 or h < 4 or w > viewport.X*2 or h > viewport.Y*2 then return nil end
     return minX,minY,maxX,maxY,cf.Position
 end
+
+-- Screen click calibration uses the selected pixel instead of assuming that
+-- Phantom Forces aims at the middle of the camera viewport.
+local pickerGui, pickerClick, pickerCancel
+local pickerActive = false
+
+local function stopPicker(reopenMenu)
+    if pickerClick then pickerClick:Disconnect(); pickerClick=nil end
+    if pickerCancel then pickerCancel:Disconnect(); pickerCancel=nil end
+    if pickerGui then pickerGui:Destroy(); pickerGui=nil end
+    pickerActive=false
+    if reopenMenu and window and window.Parent then window.Visible=true end
+end
+
+local function calibrateAtPixel(point)
+    local camera=Workspace.CurrentCamera
+    local root=Workspace:FindFirstChild("Players")
+    if not camera or not root then
+        calibrationMessage="Could not calibrate: camera or player groups missing"
+        log("WARN",calibrationMessage)
+        return
+    end
+    local ray=camera:ViewportPointToRay(point.X,point.Y)
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances={camera}
+    local hit=Workspace:Raycast(ray.Origin,ray.Direction*MAX_DISTANCE,params)
+    local selected=nil
+    if hit then
+        local group=getTeamGroup(hit.Instance)
+        if group then
+            local ancestor=hit.Instance
+            while ancestor and ancestor~=group do
+                if ancestor:IsA("Model") and validModel(ancestor) then
+                    selected=group
+                    break
+                end
+                ancestor=ancestor.Parent
+            end
+        end
+    end
+    if not selected then
+        -- If a custom character is not raycast-queryable, find its projected
+        -- bounding rectangle directly under the selected cursor location.
+        local best,score,second=nil,math.huge,math.huge
+        local queue={{root,0}}
+        local index,checked=1,0
+        while index<=#queue and checked<850 do
+            local item=queue[index]
+            index+=1
+            local node,depth=item[1],item[2]
+            for _,child in ipairs(node:GetChildren()) do
+                checked+=1
+                if checked>=850 then break end
+                if child:IsA("Folder") and depth<3 then
+                    queue[#queue+1]={child,depth+1}
+                elseif child:IsA("Model") then
+                    if validModel(child) then
+                        local group=getTeamGroup(child)
+                        local l,t,r,b=projectBox(camera,child)
+                        if group and l and point.X>=l-8 and point.X<=r+8
+                            and point.Y>=t-8 and point.Y<=b+8 then
+                            local center=Vector2.new((l+r)/2,(t+b)/2)
+                            local candidate=(point-center).Magnitude
+                            if group==best then
+                                score=math.min(score,candidate)
+                            elseif candidate<score then
+                                second=score
+                                score=candidate
+                                best=group
+                            elseif candidate<second then
+                                second=candidate
+                            end
+                        end
+                    end
+                    if depth<2 then queue[#queue+1]={child,depth+1} end
+                end
+            end
+        end
+        if best and (second==math.huge or second>score+16) then
+            selected=best
+        end
+    end
+    if not selected then
+        calibrationMessage="No distinct player rig at click - try clicking their torso"
+        log("WARN",calibrationMessage)
+        return
+    end
+    calibratedEnemyGroup=selected
+    calibrationMessage="Enemy group calibrated from selected character"
+    scanDirty=true
+    scanAccumulator=10
+    safeCall("Calibrated group scan",discoverTargets)
+    log("INFO","Enemy group selected by click; "..tostring(#targets).." targets. Other player groups excluded.")
+end
+
+local function beginPicker()
+    if pickerActive or not alive or not menuGui or not menuGui.Parent then return end
+    pickerGui=create("ScreenGui",{
+        Name="SPECTRA_SelectEnemy",IgnoreGuiInset=true,ResetOnSpawn=false,
+        DisplayOrder=10000,ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+    })
+    local ok=pcall(function() pickerGui.Parent=menuGui.Parent end)
+    if not ok then
+        pickerGui:Destroy()
+        pickerGui=nil
+        log("ERROR","Could not open select-enemy overlay")
+        return
+    end
+    pickerActive=true
+    window.Visible=false
+    local capture=create("TextButton",{
+        Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Text="",
+        Active=true,AutoButtonColor=false,BorderSizePixel=0
+    },pickerGui)
+    local tip=create("TextLabel",{
+        Size=UDim2.fromOffset(560,38),Position=UDim2.new(0.5,-280,0,12),
+        Text="SPECTRA  |  Click a visible enemy body  |  ESC to cancel",
+        BackgroundColor3=C.base,TextColor3=C.white,
+        TextSize=13,Font=Enum.Font.GothamMedium,BorderSizePixel=0,ZIndex=2
+    },capture)
+    round(tip,6)
+    pickerClick=capture.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then
+            local point=Vector2.new(input.Position.X,input.Position.Y)
+            stopPicker(true)
+            safeCall("Select enemy",function() calibrateAtPixel(point) end)
+        end
+    end)
+    pickerCancel=UserInputService.InputBegan:Connect(function(input)
+        if input.KeyCode==Enum.KeyCode.Escape then
+            stopPicker(true)
+            log("INFO","Selection canceled")
+        end
+    end)
+    log("INFO","Selection started: click enemy torso, or ESC to cancel")
+end
+
 local function updateSkeleton(w, target, camera, color)
     local segments = state.skeleton and target.bones or nil
     for i, line in ipairs(w.skeleton) do
@@ -865,6 +1003,7 @@ local function shutdown()
     if not alive then return end
     log("INFO","Unloading SPECTRA and releasing UI/resources")
     alive=false
+    stopPicker(false)
     for key in pairs(widgets) do destroyWidget(key) end
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
     for _, conn in ipairs(watcherConnections) do pcall(function() conn:Disconnect() end) end
@@ -896,7 +1035,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.4.1",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.5",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1009,7 +1148,8 @@ toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
 toggle(espPage,"Skeleton","Uses rig Motor6D joints, Bones, or standard limbs where present","skeleton")
 toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
 groupLabel(espPage,"ENEMY IDENTIFICATION")
-row(espPage,"F6 - Calibrate enemy team","Aim at a visible enemy torso, then press F6")
+action(espPage,"Select visible enemy (click to calibrate)",beginPicker)
+row(espPage,"F6 - Quick calibration","Alternative: aim exactly at enemy torso and press F6")
 local calibrationInfo = textLabel(espPage,"Not calibrated",11,C.muted)
 calibrationInfo.Size = UDim2.new(1,-3,0,26)
 calibrationInfo.TextWrapped = true
@@ -1112,6 +1252,7 @@ local function runCommand(raw)
     elseif input=="team" then
         log("INFO","Calibration: "..calibrationMessage.." | events="..groupEvents)
     elseif input=="calibrate" then calibrateEnemyFromCrosshair()
+    elseif input=="pick" then beginPicker()
     elseif input=="clearteam" then clearCalibration();discoverTargets();log("INFO","Calibration cleared")
     elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
     elseif input=="targets" then
@@ -1209,8 +1350,8 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.4.1 loaded. Right Shift: menu | F6: calibrate enemy group | F8: debug | Ctrl+End: unload")
-log("INFO","No Roblox teams found? Aim at a visible enemy and press F6 to identify their group. Unknown groups stay hidden.")
+log("INFO","SPECTRA Phase 1 v1.5 loaded. Click Select visible enemy in ESP tab, or F6 | F8: debug | Ctrl+End: unload")
+log("INFO","No Roblox team data: Select visible enemy and click body to calibrate. Unknown groups stay hidden.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
 log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
