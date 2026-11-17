@@ -1460,6 +1460,7 @@ local function compensateRecoilCamera(camera,fromEvent)
         return
     end
     local strength=math.clamp(state.recoilStrength/100,0,1)
+    if strength<=0 then return end
     local compensatedPitch=pitch-upward*strength
     local horizontal=Vector3.new(cf.LookVector.X,0,cf.LookVector.Z)
     if horizontal.Magnitude<0.01 then return end
@@ -1545,6 +1546,7 @@ local function updateRecoilModifier()
     end
     recoilData.active=true
     recoilData.fireFrames+=1
+    recoilData.lastStatus="Monitoring camera pitch while firing (experimental)"
     compensateRecoilCamera(camera,false)
 end
 
