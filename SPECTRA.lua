@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.19.0
+    SPECTRA / PHASE 1                         v1.20.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.19.0"
+local VERSION = "1.20.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -86,7 +86,7 @@ local state = {
     aimSticky = true,
     aimLock = true,
     aimPoint = "Head",
-    aimMethod = "Stabilized",
+    aimMethod = "Auto",
     speedHack = false, speedValue = 32,
     infiniteJump = false,
     noFallDamage = false,
@@ -1489,9 +1489,11 @@ local function runAimbot(dt)
     -- fallback to bounded CFrame stabilization when unavailable.
     -- Neither backend proves that weapon aim follows the camera.
     local requested=state.aimMethod
+    -- For game-controlled weapon aim, use the ordinary relative mouse path
+    -- whenever available instead of forcing Camera.CFrame by default.
+    -- Camera fallback remains visual-only and may not move weapon aim.
     local method=requested=="Auto"
-        and (camera.CameraType==Enum.CameraType.Scriptable
-            and (aimMouseMove and "Mouse" or "Stabilized") or "Camera")
+        and (aimMouseMove and "Mouse" or "Stabilized")
         or requested
     aimMetrics.lastMethod=method
     if method=="Mouse" then
@@ -1507,9 +1509,28 @@ local function runAimbot(dt)
         local snap=state.aimStyle=="Snap"
         local scale=snap and (0.65*state.aimSnapStrength/100)
             or (0.70/math.max(1,state.aimSmoothing))
+        -- A target kept locked behind the camera has inverted projection
+        -- coordinates. Use signed camera-space angles instead of the
+        -- screen-space projection when a target is behind or off-screen.
+        local projected,onScreen=camera:WorldToViewportPoint(point)
+        local correction=delta
+        if not onScreen or projected.Z<=0.5 then
+            local direction=point-camera.CFrame.Position
+            if direction.Magnitude>0.5 then
+                local localDirection=camera.CFrame:VectorToObjectSpace(direction.Unit)
+                local yaw=math.atan2(localDirection.X,-localDirection.Z)
+                local pitch=math.atan2(
+                    localDirection.Y,
+                    math.sqrt(localDirection.X*localDirection.X
+                        +localDirection.Z*localDirection.Z))
+                local pixelsPerRadian=math.max(1,camera.ViewportSize.Y)
+                    / math.rad(math.clamp(camera.FieldOfView,10,120))
+                correction=Vector2.new(yaw*pixelsPerRadian,-pitch*pixelsPerRadian)
+            end
+        end
         local cap=snap and 260 or 65
-        local dx=math.clamp(delta.X*scale,-cap,cap)
-        local dy=math.clamp(delta.Y*scale,-cap,cap)
+        local dx=math.clamp(correction.X*scale,-cap,cap)
+        local dy=math.clamp(correction.Y*scale,-cap,cap)
         local pixelX=dx>=0 and math.floor(dx+0.5) or math.ceil(dx-0.5)
         local pixelY=dy>=0 and math.floor(dy+0.5) or math.ceil(dy-0.5)
         aimMetrics.lastMouseDX=pixelX
@@ -2869,7 +2890,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.19.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.20.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3098,7 +3119,7 @@ local function launchSpectraUI()
     settingSlider(aimPage,"Smoothness","Only affects Smooth style (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
     toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
     local aimMethodButton
-    aimMethodButton=action(aimPage,"Aim method: Stabilized",function()
+    aimMethodButton=action(aimPage,"Aim method: Auto",function()
         local modes={"Auto","Mouse","Camera","Stabilized"}
         local nextIndex=1
         for i,value in ipairs(modes) do
@@ -3110,7 +3131,7 @@ local function launchSpectraUI()
     end)
     row(aimPage,"Lock behavior","First target must be inside FOV. A valid locked enemy stays selected outside FOV; it releases if lost, defeated or filtered.")
     row(aimPage,"Cover behavior","With Visibility Check off, a locked target can remain selected behind geometry. Bullets still obey game collisions.")
-    row(aimPage,"Runtime compatibility","Snap uses fast relative mouse input on Scriptable cameras or instant camera correction otherwise; weapon/reticle response unverified.")
+    row(aimPage,"Runtime compatibility","Auto prioritizes relative mouse input so game weapon controls can react. Camera fallback cannot guarantee actual gun or bullet alignment.")
     groupLabel(aimPage,"AIMBOT DIAGNOSTICS")
     action(aimPage,"Print Aimbot diagnostics to Roblox logs",function()
         local camera=Workspace.CurrentCamera
@@ -3552,7 +3573,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.19.0 loaded. Persistent aim lock and always-active tracking available")
+    log("INFO","SPECTRA Phase 1 v1.20.0 loaded. Input-first automatic tracking and persistent aim lock available")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
