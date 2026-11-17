@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.7
+    SPECTRA / PHASE 1                         v1.7.8
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.7"
+local VERSION = "1.7.8"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1090,6 +1090,23 @@ local aimLastResetDegrees = 0
 local aimOverrideStreak = 0
 local aimOverrideSamples = 0
 local aimLastRetained = false
+-- Aim gate diagnostics survive menu opening, unlike the live aimStatus.
+local aimGateCounts = {
+    disabled=0, menu=0, picker=0, noCamera=0, textFocus=0,
+    rightMouse=0, noTarget=0, tracking=0, renderErrors=0
+}
+local aimLastGameplayStatus = "No test with the menu hidden yet"
+local aimLastGameplayTime = "never"
+local aimTargetProbe = {enemies=0,onScreen=0,insideFov=0,visible=0}
+local aimLastRmbDetected = false
+local function recordAimGate(reason, status, gameplay)
+    aimGateCounts[reason]=(aimGateCounts[reason] or 0)+1
+    aimStatus=status
+    if gameplay then
+        aimLastGameplayStatus=status
+        aimLastGameplayTime=os.date("%H:%M:%S")
+    end
+end
 -- Experimental camera stabilization for Scriptable camera controllers.
 -- This listens for subsequent Camera.CFrame writes; it does not modify the
 -- game's camera module, mouse APIs, weapon logic or remote interfaces.
@@ -1204,6 +1221,7 @@ local function aimHasLineOfSight(camera,target,position)
 end
 
 local function chooseAimTarget(camera)
+    aimTargetProbe={enemies=0,onScreen=0,insideFov=0,visible=0}
     local size=camera.ViewportSize
     if size.X<1 or size.Y<1 then return nil,nil end
     local center=Vector2.new(size.X*0.5,size.Y*0.5)
@@ -1217,16 +1235,22 @@ local function chooseAimTarget(camera)
             local enemy=(playerRelation=="enemy" or groupRelation=="enemy")
                 and playerRelation~="ally" and groupRelation~="ally"
             if enemy and (root.Position-camera.CFrame.Position).Magnitude <= MAX_DISTANCE then
+                aimTargetProbe.enemies+=1
                 local point=getAimPosition(t)
                 if point then
                     local v,onScreen=camera:WorldToViewportPoint(point)
                     if onScreen and v.Z>0.5 then
+                        aimTargetProbe.onScreen+=1
                         local delta=Vector2.new(v.X,v.Y)-center
                         local d=delta.Magnitude
-                        if d<=state.aimFovRadius and aimHasLineOfSight(camera,t,point) then
-                            aimSelectionCount+=1
-                            if d<bestScore then
-                                best,bestPoint,bestDelta,bestScore=t,point,delta,d
+                        if d<=state.aimFovRadius then
+                            aimTargetProbe.insideFov+=1
+                            if aimHasLineOfSight(camera,t,point) then
+                                aimTargetProbe.visible+=1
+                                aimSelectionCount+=1
+                                if d<bestScore then
+                                    best,bestPoint,bestDelta,bestScore=t,point,delta,d
+                                end
                             end
                         end
                     end
@@ -1253,14 +1277,28 @@ local function runAimbot(dt)
     aimCorrectionsThisFrame=0
     disableAimCorrection()
     if not alive or not state.aimEnabled then
-        aimStatus="Disabled"
+        recordAimGate("disabled","Disabled",false)
         aimSelected=nil
         return
     end
     local camera=Workspace.CurrentCamera
-    if not camera or pickerActive or (window and window.Visible)
-        or UserInputService:GetFocusedTextBox() then
-        aimStatus="Inactive (UI or camera)"
+    if not camera then
+        recordAimGate("noCamera","No camera",true)
+        aimSelected=nil
+        return
+    end
+    if pickerActive then
+        recordAimGate("picker","Calibration picker open",false)
+        aimSelected=nil
+        return
+    end
+    if window and window.Visible then
+        recordAimGate("menu","Inactive (SPECTRA menu open)",false)
+        aimSelected=nil
+        return
+    end
+    if UserInputService:GetFocusedTextBox() then
+        recordAimGate("textFocus","Inactive (text input focused)",true)
         aimSelected=nil
         return
     end
@@ -1270,14 +1308,15 @@ local function runAimbot(dt)
         return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
     end)
     if inputOK then rightHeld=pressed end
+    aimLastRmbDetected=rightHeld
     if state.aimHoldRmb and not rightHeld then
-        aimStatus="Hold right mouse button"
+        recordAimGate("rightMouse","Hold right mouse button",true)
         aimSelected=nil
         return
     end
     local target,point,delta=chooseAimTarget(camera)
     if not target then
-        aimStatus="No enemy target inside FOV"
+        recordAimGate("noTarget","No enemy target inside FOV / line of sight",true)
         aimSelected=nil
         return
     end
@@ -1363,7 +1402,7 @@ local function runAimbot(dt)
         end
     end
     aimUpdates+=1
-    aimStatus="Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")"
+    recordAimGate("tracking","Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")",true)
 end
 
 -- CAMERA & INPUT DIAGNOSTICS ----------------------------------------------
@@ -1425,6 +1464,12 @@ local function updateInputDiagnostics(dt)
     end
 end
 
+local function getAimGateDiagnostics()
+    return string.format("Aim gates: tracking=%d | RMB=%d | no target=%d | menu=%d | focused=%d | errors=%d",
+        aimGateCounts.tracking,aimGateCounts.rightMouse,aimGateCounts.noTarget,
+        aimGateCounts.menu,aimGateCounts.textFocus,aimGateCounts.renderErrors)
+end
+
 local function getInputDiagnosticsLines()
     local camera=Workspace.CurrentCamera
     local cameraType=camera and camera.CameraType.Name or "(none)"
@@ -1445,6 +1490,13 @@ local function getInputDiagnosticsLines()
             ms,inputDiag.lastRotationDegrees/window,inputDiag.totalCameraDegrees),
         "Aimbot: "..(state.aimEnabled and "enabled" or "disabled")
             .." | backend: "..aimBackend.." | status: "..aimStatus,
+        "Last GAMEPLAY status: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
+        "Hold-RMB setting: "..(state.aimHoldRmb and "ON" or "OFF")
+            .." | detected RMB: "..tostring(aimLastRmbDetected),
+        getAimGateDiagnostics(),
+        string.format("Target checks: %d enemies | %d on screen | %d in FOV | %d visible",
+            aimTargetProbe.enemies,aimTargetProbe.onScreen,
+            aimTargetProbe.insideFov,aimTargetProbe.visible),
         string.format("Aim writes: %d | move samples: %d | override samples: %d",
             aimUpdates,aimMovementSamples,aimOverrideSamples),
         string.format("Last camera write: %.2f deg | last reset: %.2f deg",
@@ -1578,6 +1630,8 @@ local function report()
         "Aim FOV: "..state.aimFovRadius.." px | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
         "Aim activation: "..(state.aimHoldRmb and "Hold RMB" or "Always when enabled"),
         "Aim visible-only: "..tostring(state.aimVisibleOnly).." | candidates: "..aimSelectionCount,
+        "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
+        "Aim RMB setting: "..tostring(state.aimHoldRmb).." | "..getAimGateDiagnostics(),
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
         "Aim last active: "..aimLastActiveStatus,
         "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
@@ -1663,7 +1717,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.7",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.8",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1933,7 +1987,7 @@ debugButton("Copy report",0.335,exportReport)
 debugButton("Clear logs",0.67,function() table.clear(logs);if logBox then logBox.Text="" end end)
 groupLabel(debugPage,"CAMERA & INPUT DIAGNOSTICS")
 local inputDiagPanel=create("Frame",{
-    Size=UDim2.new(1,-3,0,165),BackgroundColor3=C.panel,BorderSizePixel=0
+    Size=UDim2.new(1,-3,0,255),BackgroundColor3=C.panel,BorderSizePixel=0
 },debugPage)
 round(inputDiagPanel,6)
 inputDiagLiveText=create("TextLabel",{
@@ -2001,7 +2055,9 @@ local function runCommand(raw)
         end
     elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
     elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
-    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | lastActive="..aimLastActiveStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrideSamples="..aimOverrideSamples.." | overrideStreak="..aimOverrideStreak.." | lastResetDegrees="..string.format("%.2f",aimLastResetDegrees).." | cameraCorrections="..aimCorrectionCount.." | cameraConflicts="..aimCorrectionObservations.." | correctionErrors="..aimCorrectionErrors)
+    elseif input=="aimstatus" then
+        log("INFO","Aim: "..aimStatus.." | gameplay="..aimLastGameplayStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrides="..aimOverrideSamples.." | corrections="..aimCorrectionCount)
+        log("INFO",getAimGateDiagnostics().." | holdRMB="..tostring(state.aimHoldRmb))
     elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
     elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
     elseif input=="clear" then table.clear(logs);logBox.Text=""
@@ -2121,6 +2177,9 @@ local aimBindOk,aimBindError=pcall(function()
         local ok,err=pcall(runAimbot,dt)
         if not ok then
             aimErrors+=1
+            aimGateCounts.renderErrors+=1
+            aimLastGameplayStatus="Aimbot runtime error: "..tostring(err)
+            aimLastGameplayTime=os.date("%H:%M:%S")
             if aimErrors<=3 then log("ERROR","Aimbot update failed: "..tostring(err)) end
         end
     end)
@@ -2128,7 +2187,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.7 loaded. ESP and Skeleton default ON | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.7.8 loaded. Persistent aim gate diagnostics; ESP+Skeleton default ON | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
