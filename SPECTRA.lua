@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.9.5
+    SPECTRA / PHASE 1                         v1.9.6
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.9.5"
+local VERSION = "1.9.6"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1567,6 +1567,7 @@ local Movement = (function()
         model=nil,root=nil,humanoid=nil,status="No verified local character",source="none",
         saved=nil,lastScan=0,lastJump=0,lastHop=0,spinAngle=0,errors=0,
         lastProbe=nil,measuredSpeed=0,measuredVertical=0,
+        spaceHeld=false,antiOffset=0,verifiedFrames=0,unavailableFrames=0,
         originalHum=nil,collisions=setmetatable({},{__mode="k"}),
         writes={speed=0,fly=0,noclip=0,jump=0,fall=0,tp=0,spin=0,anti=0}
     }
@@ -1589,6 +1590,7 @@ local Movement = (function()
             end)
         end
         movement.originalHum=nil
+        movement.antiOffset=0
         for part,collision in pairs(movement.collisions) do
             if part and part.Parent then
                 pcall(function() part.CanCollide=collision end)
@@ -1608,6 +1610,8 @@ local Movement = (function()
             movement.root=root
             movement.humanoid=model:FindFirstChildWhichIsA("Humanoid",true)
             movement.source=source
+            movement.verifiedFrames=0
+            movement.antiOffset=0
         end
         movement.status="Verified local character ("..source..")"
         return true
@@ -1682,6 +1686,7 @@ local Movement = (function()
         if movement.model or movement.originalHum then restoreMovement() end
         movement.model=nil;movement.root=nil;movement.humanoid=nil
         movement.source="none"
+        movement.unavailableFrames+=1
         movement.status="Unavailable: no verified self-rig. Phantom Forces may keep movement in a custom controller"
         return nil,nil,nil
     end
@@ -1842,6 +1847,7 @@ local Movement = (function()
             status("Spinbot",state.spinbot),
             status("Anti Aim",state.antiAim),
             string.format("Measured root velocity: %.1f horizontal / %.1f vertical studs/s",movement.measuredSpeed,movement.measuredVertical),
+            string.format("Frames with verified local rig: %d | unavailable checks: %d",movement.verifiedFrames,movement.unavailableFrames),
             string.format("Write attempts: speed=%d fly=%d noclip=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
                 w.speed,w.fly,w.noclip,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
             movement.lastProbe or "Probe: not run (use modprobe)",
@@ -1852,14 +1858,29 @@ local Movement = (function()
 
     local function updateMovement(dt)
         if not alive then return end
+        -- Some FPS controllers consume JumpRequest, so detect Space's key
+        -- transition as a second, debounced input path.
+        local spaceDown=UserInputService:IsKeyDown(Enum.KeyCode.Space)
+        local newSpacePress=spaceDown and not movement.spaceHeld
+        movement.spaceHeld=spaceDown
         if not movementHasModes() then
+            if movement.antiOffset~=0 and movement.root and movement.root.Parent then
+                pcall(function()
+                    movement.root.CFrame=movement.root.CFrame*CFrame.Angles(0,-movement.antiOffset,0)
+                end)
+            end
             if movement.originalHum or next(movement.collisions) then restoreMovement() end
+            movement.antiOffset=0
             movement.status="Movement modifiers off"
             return
+        end
+        if newSpacePress and (state.infiniteJump or state.highJump) then
+            movementJumpRequested()
         end
         local model,root,h=findMovementRig(false)
         if not root then return end
         if root.Anchored then movement.status="Unavailable: local root anchored";return end
+        movement.verifiedFrames+=1
         local measured=root.AssemblyLinearVelocity
         movement.measuredSpeed=Vector3.new(measured.X,0,measured.Z).Magnitude
         movement.measuredVertical=measured.Y
@@ -1899,7 +1920,9 @@ local Movement = (function()
             local desired=dir+Vector3.new(0,up,0)
             root.AssemblyLinearVelocity=(desired.Magnitude>1 and desired.Unit or desired)*state.flySpeed
             movement.writes.fly+=1
-        elseif state.speedHack and not h and dir.Magnitude>0 then
+        elseif state.speedHack and dir.Magnitude>0 then
+            -- Custom rigs may expose a Humanoid while their movement speed is
+            -- driven by another controller. Apply owned-body velocity too.
             root.AssemblyLinearVelocity=Vector3.new(dir.X*state.speedValue,v.Y,dir.Z*state.speedValue)
             movement.writes.speed+=1
         end
@@ -1914,19 +1937,22 @@ local Movement = (function()
                 movement.writes.fall+=1
             end
         end
-        if state.spinbot or state.antiAim then
-            local yaw
-            if state.spinbot then
-                movement.spinAngle+=math.rad(state.spinRate)*dt
-                yaw=movement.spinAngle
-                movement.writes.spin+=1
-            else
-                yaw=math.sin(os.clock()*20)*math.rad(35)
-                movement.writes.anti+=1
-            end
-            root.CFrame=CFrame.new(root.Position)*CFrame.Angles(0,yaw,0)
+        if state.spinbot then
+            -- Rotation relative to the current body heading avoids snapping
+            -- every frame to world yaw zero.
+            root.CFrame=root.CFrame*CFrame.Angles(0,math.rad(state.spinRate)*dt,0)
+            movement.writes.spin+=1
+            movement.antiOffset=0
+        elseif state.antiAim then
+            local wanted=math.sin(os.clock()*20)*math.rad(35)
+            root.CFrame=root.CFrame*CFrame.Angles(0,wanted-movement.antiOffset,0)
+            movement.antiOffset=wanted
+            movement.writes.anti+=1
+        elseif movement.antiOffset~=0 then
+            root.CFrame=root.CFrame*CFrame.Angles(0,-movement.antiOffset,0)
+            movement.antiOffset=0
         end
-        movement.status="Local changes attempted; verify in-game result"
+        movement.status="Local writes attempted on verified rig; server response unverified"
     end
 
 
@@ -2266,7 +2292,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.5",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.6",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2462,6 +2488,15 @@ local function launchSpectraUI()
 
     local modifiersPage=pages.Modifiers
     header(modifiersPage,"Modifiers","Local visual gameplay adjustments")
+    groupLabel(modifiersPage,"GAME COMPATIBILITY")
+    Movement.statusLabel=textLabel(modifiersPage,"Checking for an owned, controllable character...",11,C.orange)
+    Movement.statusLabel.Size=UDim2.new(1,-3,0,64)
+    Movement.statusLabel.TextWrapped=true
+    action(modifiersPage,"Recheck character compatibility",function()
+        log("INFO",Movement.probe())
+        log("INFO",Movement.data.status)
+    end)
+    row(modifiersPage,"Availability","An ON toggle is a request, not proof of a working modifier")
     groupLabel(modifiersPage,"RECOIL")
     toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
     settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
@@ -2495,15 +2530,8 @@ local function launchSpectraUI()
     toggle(modifiersPage,"Spinbot","Rotates local character; may disturb movement","spinbot")
     settingSlider(modifiersPage,"Spin rate","Degrees per second","spinRate",60,720,30," deg/s")
     toggle(modifiersPage,"Anti Aim (local visual)","Jitters local model; does NOT alter server hitbox","antiAim")
-    groupLabel(modifiersPage,"MOVEMENT STATUS")
-    Movement.statusLabel=textLabel(modifiersPage,"Waiting for verified local character",11,C.muted)
-    Movement.statusLabel.Size=UDim2.new(1,-3,0,57)
-    Movement.statusLabel.TextWrapped=true
-    row(modifiersPage,"Server limitations","Server can reject speed, flight, teleport, damage changes")
-    action(modifiersPage,"Identify local character (diagnose)",function()
-        log("INFO",Movement.probe())
-        log("INFO",Movement.data.status)
-    end)
+    groupLabel(modifiersPage,"SERVER LIMITATIONS")
+    row(modifiersPage,"Local only","The game can reject speed, flight, teleport, damage changes")
     action(modifiersPage,"Copy movement status",function()
         local text=Movement.report()
         if type(setclipboard)=="function" then
@@ -2765,7 +2793,10 @@ local function launchSpectraUI()
                     recoilData.lastStatus,recoilData.writeSuccess,recoilData.suppressedDegrees)
             end
             if Movement.statusLabel and Movement.statusLabel.Parent then
-                Movement.statusLabel.Text=Movement.data.status.."\nSource: "..Movement.data.source.." | errors: "..Movement.data.errors
+                Movement.statusLabel.Text=Movement.data.status.."\nSource: "..Movement.data.source
+                    .." | errors: "..Movement.data.errors
+                Movement.statusLabel.TextColor3=(Movement.data.root and Movement.data.root.Parent)
+                    and C.green or C.orange
             end
             if statusText and statusText.Parent then
                 statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
@@ -2837,9 +2868,12 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.9.5 loaded. Expanded owner-verified rig search and per-feature status | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.9.6 loaded. Modifier fixes and live compatibility indicator | ESP+Skeleton ON")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
+    safeCall("Initial movement compatibility",function()
+        log("INFO","Movement compatibility: "..Movement.probe())
+    end)
     safeCall("Initial scan",discoverTargets)
     log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
 end
