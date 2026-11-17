@@ -1,8 +1,8 @@
 -- SPECTRA loader: reject stale GitHub/raw cache responses.
 -- The pinned source is a guaranteed minimum build, not a separate update channel.
 local BRANCH_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/76927436b0f963c85d74dce4baa4d82f3e10367f/SPECTRA.lua"
-local MINIMUM_VERSION = "1.9.1"
+local PINNED_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/2f4b30315544a3ccc739d1523d183cc9f5ae5e80/SPECTRA.lua"
+local MINIMUM_VERSION = "1.9.2"
 
 if type(loadstring) ~= "function" then
     warn("[SPECTRA Loader] loadstring is unavailable")
@@ -54,9 +54,14 @@ end
 
 print("[SPECTRA Loader] Executing v" .. version .. " via " .. origin)
 
-local compileOk, compiled = pcall(loadstring, source)
+-- Luau loadstring returns (nil, compileError) for syntax errors.
+-- pcall preserves both values; earlier loaders discarded compileError and
+-- misleadingly displayed "Compilation failed: nil".
+local compileOk, compiled, compileError = pcall(loadstring, source)
 if not compileOk or type(compiled)~="function" then
-    warn("[SPECTRA Loader] Compilation failed: " .. tostring(compiled))
+    local reason = not compileOk and compiled or (compileError or compiled)
+    warn("[SPECTRA Loader] Compilation failed in v" .. tostring(version)
+        .. ": " .. tostring(reason or "executor did not provide an error"))
     return
 end
 local runOk, runError = pcall(compiled)
