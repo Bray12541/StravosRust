@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.13.1
+    SPECTRA / PHASE 1                         v1.14.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.13.1"
+local VERSION = "1.14.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -86,7 +86,6 @@ local state = {
     noRecoil = false,
     recoilStrength = 100,
     speedHack = false, speedValue = 32,
-    fly = false, flySpeed = 45,
     infiniteJump = false,
     highJump = false, jumpPower = 96,
     bunnyHop = false, noFallDamage = false,
@@ -1615,13 +1614,6 @@ local SelfCalibration=(function()
         local hadPending=cal.pending~=nil
         cal.pending=nil
         cal.active=nil
-        -- Stop persistent flight attempts when a life ends. A server-side
-        -- rejection cannot be circumvented by continued local velocity writes.
-        if wasActive and state.fly then
-            state.fly=false
-            refreshAllToggles()
-            log("WARN","Fly automatically disabled after camera/character loss. Server acceptance of flight is not verified.")
-        end
         if reason=="Cleared by user" or reason=="SPECTRA unloaded"
             or reason=="New observation started" then
             cal.rearmRequested=false
@@ -1753,11 +1745,11 @@ local Movement = (function()
         lastProbe=nil,measuredSpeed=0,measuredVertical=0,
         spaceHeld=false,antiOffset=0,verifiedFrames=0,unavailableFrames=0,
         originalHum=nil,
-        writes={speed=0,fly=0,jump=0,fall=0,tp=0,spin=0,anti=0}
+        writes={speed=0,jump=0,fall=0,tp=0,spin=0,anti=0}
     }
 
     local function movementHasModes()
-        return state.speedHack or state.fly or state.infiniteJump
+        return state.speedHack or state.infiniteJump
             or state.highJump or state.bunnyHop or state.noFallDamage
             or state.spinbot or state.antiAim
     end
@@ -1812,7 +1804,7 @@ local Movement = (function()
             return movement.model,movement.root,movement.humanoid
         end
         -- Auto-calibration of a new life must bypass the normal 0.8s
-        -- polling throttle so speed/fly don't wait for an old character scan.
+        -- polling throttle so movement effects do not wait for an old character scan.
         local newlyConfirmed=SelfCalibration.active
             and SelfCalibration.active.model~=movement.model
         if not force and not newlyConfirmed and os.clock()-movement.lastScan<0.8 then
@@ -2035,7 +2027,6 @@ local Movement = (function()
             "Movement: "..movement.status.." | source="..movement.source.." | saved="..tostring(movement.saved~=nil),
             "Session calibration: "..SelfCalibration.statusText(),
             status("Speed",state.speedHack),
-            status("Fly",state.fly),
             status("Infinite Jump",state.infiniteJump),
             status("High Jump",state.highJump),
             status("Bunny Hop",state.bunnyHop),
@@ -2044,8 +2035,8 @@ local Movement = (function()
             status("Anti Aim",state.antiAim),
             string.format("Measured root velocity: %.1f horizontal / %.1f vertical studs/s",movement.measuredSpeed,movement.measuredVertical),
             string.format("Frames with verified local rig: %d | unavailable checks: %d",movement.verifiedFrames,movement.unavailableFrames),
-            string.format("Write attempts: speed=%d fly=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
-                w.speed,w.fly,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
+            string.format("Write attempts: speed=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d",
+                w.speed,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors),
             movement.lastProbe or "Probe: not run (use modprobe)",
             "Client camera movement cannot substitute for a missing local character.",
             "Client-only writes cannot guarantee server-side fall-damage immunity, flight, teleport, or anti-aim."
@@ -2090,28 +2081,20 @@ local Movement = (function()
             if state.highJump then
                 h.UseJumpPower=true;h.JumpPower=state.jumpPower
             else h.JumpPower=old.jump;h.JumpHeight=old.height;h.UseJumpPower=old.useJump end
-            h.PlatformStand=state.fly or old.stand
         end
         local dir=movementDirection()
         local v=root.AssemblyLinearVelocity
-        if state.fly then
-            local up=0
-            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then up+=1 end
-            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then up-=1 end
-            local desired=dir+Vector3.new(0,up,0)
-            root.AssemblyLinearVelocity=(desired.Magnitude>1 and desired.Unit or desired)*state.flySpeed
-            movement.writes.fly+=1
-        elseif state.speedHack and dir.Magnitude>0 then
+        if state.speedHack and dir.Magnitude>0 then
             -- Custom rigs may expose a Humanoid while their movement speed is
             -- driven by another controller. Apply owned-body velocity too.
             root.AssemblyLinearVelocity=Vector3.new(dir.X*math.clamp(state.speedValue,16,50),v.Y,dir.Z*math.clamp(state.speedValue,16,50))
             movement.writes.speed+=1
         end
-        if state.bunnyHop and not state.fly and dir.Magnitude>0
+        if state.bunnyHop and dir.Magnitude>0
             and os.clock()-movement.lastHop>0.22 and movementGrounded(root,h) then
             movement.lastHop=os.clock();movementJump()
         end
-        if state.noFallDamage and not state.fly then
+        if state.noFallDamage then
             local fall=root.AssemblyLinearVelocity
             if fall.Y < -32 and movementGrounded(root,nil,7) then
                 root.AssemblyLinearVelocity=Vector3.new(fall.X,-12,fall.Z)
@@ -2515,7 +2498,6 @@ local Compat=(function()
         line("[OPT-IN MOVEMENT OBSERVATION]")
         line(compat.lastObservation)
         line("An input/motion correlation does not establish identity or server-controlled abilities.")
-        line("Fly resets OFF after a character switch; server-side return to menu cannot be prevented by local code.")
         line("")
         line("[CAMERA & INPUT]")
         line("CurrentCamera exists: "..bool(camera~=nil))
@@ -2534,9 +2516,9 @@ local Compat=(function()
         line("")
         line("[FEATURE CAPABILITY / EVIDENCE ONLY]")
         if not root or not candidate then
-            line("Speed / Fly / Jump / Teleport / Spin: UNAVAILABLE; no verified writable self-rig")
+            line("Speed / Jump / Teleport / Spin: UNAVAILABLE; no verified writable self-rig")
         elseif root.Anchored then
-            line("Speed / Fly / Jump / Teleport / Spin: RESTRICTED; root anchored")
+            line("Speed / Jump / Teleport / Spin: RESTRICTED; root anchored")
         else
             line("Movement modifiers: local BasePart exists; server-accepted effect NOT VERIFIED")
             line("Humanoid movement controls: "..(hum and "exposed" or "NOT EXPOSED"))
@@ -2904,7 +2886,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.13.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.14.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3125,8 +3107,6 @@ local function launchSpectraUI()
     groupLabel(modifiersPage,"MOVEMENT")
     toggle(modifiersPage,"Speed Hack","Local speed changes; server can reset movement","speedHack")
     settingSlider(modifiersPage,"Speed","Limited to 50 studs/s to avoid observed choppiness","speedValue",16,50,2,"")
-    toggle(modifiersPage,"Fly","Experimental: server may reset deployment; auto-OFF on character change","fly")
-    settingSlider(modifiersPage,"Fly speed","Target flight speed","flySpeed",15,120,5,"")
     toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
     toggle(modifiersPage,"High Jump","Increases local jump impulse","highJump")
     settingSlider(modifiersPage,"Jump power","Impulse for High Jump","jumpPower",48,160,4,"")
@@ -3544,7 +3524,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.13.1 loaded. Auto calibration after movement correlation; speed capped at 50")
+    log("INFO","SPECTRA Phase 1 v1.14.0 loaded. Fly removed; Aimbot target lock and live aim-source diagnostics")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
