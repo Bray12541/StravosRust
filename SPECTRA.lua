@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.3
+    SPECTRA / PHASE 1                         v1.7.4
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.3"
+local VERSION = "1.7.4"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -37,7 +37,7 @@ local logs = {}
 local targets = {}
 local lastSource = "Not scanned"
 local lastScanDetails = "Not scanned"
-local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, approxSkeletons=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
+local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, approxSkeletons=0, wideSkeletons=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
 local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu, aimFovFrame
 local focusedTab = "ESP"
 local tabs = {}
@@ -887,50 +887,94 @@ end
 -- When no actual joints are available, use an explicitly estimated stick figure
 -- scaled to the screen-space body bounding box. This is not the true bone pose.
 -- Normalized coordinates (x, y) within the visible character box.
-local ESTIMATED_JOINTS = {
-    {0.50,0.11}, -- 1  head
-    {0.50,0.23}, -- 2  neck
-    {0.50,0.43}, -- 3  chest
-    {0.50,0.60}, -- 4  pelvis
-    {0.26,0.27}, -- 5  left shoulder
-    {0.13,0.43}, -- 6  left elbow
-    {0.09,0.59}, -- 7  left hand
-    {0.74,0.27}, -- 8  right shoulder
-    {0.87,0.43}, -- 9  right elbow
-    {0.91,0.59}, -- 10 right hand
-    {0.37,0.62}, -- 11 left hip
-    {0.34,0.79}, -- 12 left knee
-    {0.32,0.96}, -- 13 left foot
-    {0.63,0.62}, -- 14 right hip
-    {0.66,0.79}, -- 15 right knee
-    {0.68,0.96}, -- 16 right foot
+-- Fallback only: the game does not replicate standard joint links for
+-- every character. Use two different screen-space proportions rather than
+-- imposing an upright figure on a crouched/prone/ragdolled silhouette.
+-- These lines are deliberately estimates, not measured bone joints.
+local ESTIMATED_UPRIGHT_JOINTS = {
+    {0.50,0.12}, -- head
+    {0.50,0.24}, -- neck
+    {0.50,0.43}, -- chest
+    {0.50,0.57}, -- hips
+    {0.37,0.27}, {0.25,0.39}, {0.22,0.57}, -- left arm
+    {0.63,0.27}, {0.75,0.39}, {0.78,0.57}, -- right arm
+    {0.43,0.59}, {0.40,0.76}, {0.39,0.91}, -- left leg
+    {0.57,0.59}, {0.60,0.76}, {0.61,0.91}  -- right leg
 }
-local ESTIMATED_BONES = {
+local ESTIMATED_WIDE_JOINTS = {
+    {0.40,0.26}, -- head (approximate on a broad horizontal silhouette)
+    {0.45,0.43}, -- neck
+    {0.53,0.52}, -- chest
+    {0.67,0.60}, -- hips
+    {0.35,0.45}, {0.23,0.49}, {0.13,0.61}, -- left arm
+    {0.65,0.43}, {0.80,0.51}, {0.90,0.60}, -- right arm
+}
+local ESTIMATED_UPRIGHT_EDGES = {
     {1,2}, {2,3}, {3,4},
     {2,5}, {5,6}, {6,7},
     {2,8}, {8,9}, {9,10},
     {4,11}, {11,12}, {12,13},
     {4,14}, {14,15}, {15,16}
 }
-local function updateEstimatedSkeleton(w,left,top,right,bottom,color)
+-- When the projected rig is broad and short, apparent knees and feet
+-- cannot be inferred from bounds. Do not invent vertical leg lines.
+local ESTIMATED_WIDE_EDGES = {
+    {1,2}, {2,3}, {3,4},
+    {2,5}, {5,6}, {6,7},
+    {2,8}, {8,9}, {9,10}
+}
+local function updateEstimatedSkeleton(w,model,camera,left,top,right,bottom,color)
     local width,height=right-left,bottom-top
-    if width<=2 or height<=4 then
+    if width<=3 or height<=6 then
         for _,line in ipairs(w.skeleton) do line.Visible=false end
-        return
+        return false
+    end
+    -- The prone/ragdoll silhouette in Phantom Forces can be over twice as
+    -- wide as it is tall. A standing rig is usually taller than it is wide.
+    local isWide=(width/height)>=1.35
+    local joints=isWide and ESTIMATED_WIDE_JOINTS or ESTIMATED_UPRIGHT_JOINTS
+    local edges=isWide and ESTIMATED_WIDE_EDGES or ESTIMATED_UPRIGHT_EDGES
+
+    -- Prefer an actual replicated head part when one exists. Unlike guessed
+    -- geometry, this follows the real character while moving or animating.
+    local headPart=model:FindFirstChild("Head",true)
+    local headX,headY=nil,nil
+    if headPart and headPart:IsA("BasePart") then
+        local projected,visible=camera:WorldToViewportPoint(headPart.Position)
+        if visible and projected.Z>0 then
+            if projected.X>=left and projected.X<=right
+                and projected.Y>=top and projected.Y<=bottom then
+                headX,headY=projected.X,projected.Y
+            end
+        end
+    end
+
+    local function position(index)
+        local v=joints[index]
+        local x=left+width*v[1]
+        local y=top+height*v[2]
+        if index==1 and headX and headY then
+            x,y=headX,headY
+        elseif index==2 and headX and headY then
+            -- Keep the neck near the actual head if its position is known.
+            local neckX=headX+(isWide and width*0.05 or 0)
+            local neckY=headY+height*(isWide and 0.14 or 0.12)
+            x=math.clamp(neckX,left+width*0.08,right-width*0.08)
+            y=math.clamp(neckY,top+height*0.08,bottom-height*0.08)
+        end
+        return x,y
     end
     for index,line in ipairs(w.skeleton) do
-        local pair=ESTIMATED_BONES[index]
+        local pair=edges[index]
         if pair then
-            local a=ESTIMATED_JOINTS[pair[1]]
-            local b=ESTIMATED_JOINTS[pair[2]]
-            put(line,
-                left+width*a[1],top+height*a[2],
-                left+width*b[1],top+height*b[2],
-                color,1)
+            local ax,ay=position(pair[1])
+            local bx,by=position(pair[2])
+            put(line,ax,ay,bx,by,color,1)
         else
             line.Visible=false
         end
     end
+    return isWide
 end
 
 local function updateHighlight(w, model, camera, color)
@@ -965,6 +1009,7 @@ local function render()
     if not camera then return end
     local done = 0
     local approximateCount=0
+    local wideCount=0
     for _, t in ipairs(targets) do
         local model = t.model
         local w = widgets[model]
@@ -1001,8 +1046,9 @@ local function render()
                 put(w.tracer,viewport.X/2,viewport.Y-10,(left+right)/2,bottom,clr,1)
             end
             if state.skeleton and #t.bones == 0 then
-                updateEstimatedSkeleton(w,left,top,right,bottom,clr)
+                local wide=updateEstimatedSkeleton(w,model,camera,left,top,right,bottom,clr)
                 approximateCount += 1
+                if wide then wideCount += 1 end
             else
                 updateSkeleton(w,t,camera,clr)
             end
@@ -1013,6 +1059,7 @@ local function render()
     end
     stats.rendered = done
     stats.approxSkeletons = approximateCount
+    stats.wideSkeletons = wideCount
 end
 
 
@@ -1353,6 +1400,7 @@ local function report()
             .." | override samples: "..aimOverrideSamples,
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
         "Estimated 2D skeletons shown: "..tostring(stats.approxSkeletons).." (not actual bone poses)",
+        "Low/wide fallback skeletons: "..tostring(stats.wideSkeletons).." (leg lines hidden)",
         "No getgc, hooks, remote scripts, or writes to other character models.",
         "-- RECENT LOGS --"
     }
@@ -1417,7 +1465,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.3",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.4",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1617,7 +1665,7 @@ groupLabel(espPage,"DISPLAY")
 toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
 toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
 toggle(espPage,"Tracers","Lines from the screen bottom toward players","tracers")
-toggle(espPage,"Skeleton","Real rig joints where found; estimated shape otherwise","skeleton")
+toggle(espPage,"Skeleton","Real joints if available; posture-aware estimate otherwise","skeleton")
 toggle(espPage,"3D highlight","Client-side character highlighting","highlights")
 
 -- Keep the menu fully inside the viewport, including after user dragging,
@@ -1833,7 +1881,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.3 loaded. Late render camera aim | per-frame reset diagnostics | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.7.4 loaded. Posture-aware skeleton fallback | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
