@@ -1,70 +1,77 @@
--- SPECTRA loader: reject stale GitHub/raw cache responses.
--- The pinned source is a guaranteed minimum build, not a separate update channel.
-local BRANCH_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/71a714afa8f229f7ee8a2f6d7b5a0d2fdff633a4/SPECTRA.lua"
+-- SPECTRA loader / verified baseline v1.9.3
+-- Live branch is used when it is current AND actually compiles.
+-- A stale or un-compilable response falls back to the pinned, tested build.
+local BRANCH_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
+local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/71a714afa8f229f7ee8a2f6d7b5a0d2fdff633a4/SPECTRA.lua"
 local MINIMUM_VERSION = "1.9.3"
 
 if type(loadstring) ~= "function" then
-    warn("[SPECTRA Loader] loadstring is unavailable")
+    warn("[SPECTRA Loader] Your execution environment does not provide loadstring")
     return
 end
 
-local function sourceVersion(source)
+local function parseVersion(source)
     if type(source) ~= "string" then return nil end
     return source:match('local%s+VERSION%s*=%s*"(%d+%.%d+%.%d+)"')
 end
 
-local function versionAtLeast(version, minimum)
+local function isAtLeast(version, required)
     local x,y,z = tostring(version or ""):match("^(%d+)%.(%d+)%.(%d+)$")
-    local a,b,c = tostring(minimum):match("^(%d+)%.(%d+)%.(%d+)$")
+    local a,b,c = required:match("^(%d+)%.(%d+)%.(%d+)$")
     if not (x and a) then return false end
-    x,y,z = tonumber(x),tonumber(y),tonumber(z)
-    a,b,c = tonumber(a),tonumber(b),tonumber(c)
+    x,y,z=tonumber(x),tonumber(y),tonumber(z)
+    a,b,c=tonumber(a),tonumber(b),tonumber(c)
     if x~=a then return x>a end
     if y~=b then return y>b end
     return z>=c
 end
 
 local function fetch(url)
-    local ok, source = pcall(function() return game:HttpGet(url) end)
-    if ok and type(source)=="string" and #source>500 then
-        return source
+    local ok,source=pcall(function() return game:HttpGet(url) end)
+    if not ok or type(source)~="string" or #source<500 then
+        return nil,tostring(source)
     end
-    return nil, tostring(source)
+    return source
 end
 
-local nonce = tostring(os.time()) .. "-" .. tostring(math.random(100000,999999))
-local source, errorMessage = fetch(BRANCH_RAW_URL .. "?v=" .. nonce)
-local version = sourceVersion(source)
-local origin = "live branch"
-
-if not versionAtLeast(version, MINIMUM_VERSION) then
-    warn("[SPECTRA Loader] Branch response was " .. tostring(version or "missing")
-        .. " (minimum " .. MINIMUM_VERSION .. "); trying pinned source")
-    source, errorMessage = fetch(PINNED_RAW_URL .. "?v=" .. nonce)
-    version = sourceVersion(source)
-    origin = "pinned recovery"
+local function getCompiledSource(url,origin)
+    local source,fetchError=fetch(url)
+    if not source then
+        warn("[SPECTRA Loader] "..origin.." download failed: "..tostring(fetchError))
+        return nil
+    end
+    local version=parseVersion(source)
+    if not isAtLeast(version,MINIMUM_VERSION) then
+        warn("[SPECTRA Loader] "..origin.." returned "..tostring(version or "no version")
+            .."; minimum required is "..MINIMUM_VERSION)
+        return nil
+    end
+    -- The third result matters: Luau's loadstring returns nil, compilerError.
+    local ok,compiled,compileError=pcall(loadstring,source)
+    if not ok or type(compiled)~="function" then
+        local detail=not ok and compiled or (compileError or compiled)
+        warn("[SPECTRA Loader] "..origin.." v"..version
+            .." compilation failed: "..tostring(detail or "no compiler details"))
+        return nil
+    end
+    return {run=compiled,version=version,origin=origin}
 end
 
-if not source or not versionAtLeast(version, MINIMUM_VERSION) then
-    warn("[SPECTRA Loader] No valid current build fetched. "
-        .. "Last source=" .. tostring(version) .. " | fetch error=" .. tostring(errorMessage))
+local nonce=tostring(os.time()).."-"..tostring(math.random(100000,999999))
+local selected=getCompiledSource(BRANCH_URL.."?v="..nonce,"live branch")
+if not selected then
+    warn("[SPECTRA Loader] Switching to pinned, compiler-tested v"..MINIMUM_VERSION)
+    selected=getCompiledSource(PINNED_URL.."?v="..nonce,"pinned recovery")
+end
+if not selected then
+    warn("[SPECTRA Loader] No valid build. Check your executor network access.")
     return
 end
 
-print("[SPECTRA Loader] Executing v" .. version .. " via " .. origin)
-
--- Luau loadstring returns (nil, compileError) for syntax errors.
--- pcall preserves both values; earlier loaders discarded compileError and
--- misleadingly displayed "Compilation failed: nil".
-local compileOk, compiled, compileError = pcall(loadstring, source)
-if not compileOk or type(compiled)~="function" then
-    local reason = not compileOk and compiled or (compileError or compiled)
-    warn("[SPECTRA Loader] Compilation failed in v" .. tostring(version)
-        .. ": " .. tostring(reason or "executor did not provide an error"))
-    return
-end
-local runOk, runError = pcall(compiled)
-if not runOk then
-    warn("[SPECTRA Loader] Runtime error: " .. tostring(runError))
+print("[SPECTRA Loader] Compiled v"..selected.version.." from "..selected.origin.."; starting UI")
+local ok,err=pcall(selected.run)
+if not ok then
+    warn("[SPECTRA Loader] Startup failed in v"..selected.version..": "..tostring(err))
+else
+    print("[SPECTRA Loader] v"..selected.version.." finished startup without Lua exceptions")
 end
