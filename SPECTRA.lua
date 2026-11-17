@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.11.3
+    SPECTRA / PHASE 1                         v1.11.4
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.11.3"
+local VERSION = "1.11.4"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1787,7 +1787,13 @@ local Movement = (function()
                 or SelfCalibration.isCurrent(movement.model)) then
             return movement.model,movement.root,movement.humanoid
         end
-        if not force and os.clock()-movement.lastScan<0.8 then return nil,nil,nil end
+        -- Reconfirmation of a new life must bypass the normal 0.8s
+        -- polling throttle so speed/fly don't wait for an old character scan.
+        local newlyConfirmed=SelfCalibration.active
+            and SelfCalibration.active.model~=movement.model
+        if not force and not newlyConfirmed and os.clock()-movement.lastScan<0.8 then
+            return nil,nil,nil
+        end
         movement.lastScan=os.clock()
         if setMovementRig(LocalPlayer.Character,"Player.Character") then
             return movement.model,movement.root,movement.humanoid
@@ -2403,6 +2409,10 @@ local Compat=(function()
             candidate=subjectModel
             candidateSource="verified CameraSubject ancestor"
         end
+        if not candidate and subjectModel and SelfCalibration.isCurrent(subjectModel) then
+            candidate=subjectModel
+            candidateSource="manual session camera confirmation; ownership UNVERIFIED"
+        end
 
         -- Bounded read of replicated models, avoiding scanning the entire
         -- Workspace or assuming a nearby anonymous rig is the local player.
@@ -2468,7 +2478,10 @@ local Compat=(function()
             line("Humanoid JumpPower: "..tostring(readable(function() return hum.JumpPower end,"unknown")))
             line("Humanoid FloorMaterial: "..readEnum(readable(function() return hum.FloorMaterial end,nil)))
         end
-        local status=category(candidate,root,hum)
+        local isManual=candidate and SelfCalibration.isCurrent(candidate)
+        local status=isManual
+            and "SESSION-CALIBRATED: camera-followed rig exposed; true ownership and server effects UNVERIFIED"
+            or category(candidate,root,hum)
         line("Movement API: "..status)
         line("Session camera-model calibration: "..SelfCalibration.statusText())
         line("")
@@ -2863,7 +2876,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.3",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.4",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3507,7 +3520,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.11.3 loaded. Automatic read-only redeploy recheck; explicit confirmation still required")
+    log("INFO","SPECTRA Phase 1 v1.11.4 loaded. Redeploy recheck, immediate confirmed-rig reacquisition, explicit confirmation")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
