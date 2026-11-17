@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.6.2
+    SPECTRA / PHASE 1                         v1.7.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.6.2"
+local VERSION = "1.7.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -38,7 +38,7 @@ local targets = {}
 local lastSource = "Not scanned"
 local lastScanDetails = "Not scanned"
 local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, approxSkeletons=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
-local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu
+local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu, aimFovFrame
 local focusedTab = "ESP"
 local tabs = {}
 local toggleRefreshers = {}
@@ -75,6 +75,14 @@ local state = {
     tracers = false,
     skeleton = false,
     highlights = false,
+    aimEnabled = false,
+    aimFovVisible = true,
+    aimFovRadius = 150,
+    aimSmoothing = 8,
+    aimVisibleOnly = false,
+    aimHoldRmb = true,
+    aimPoint = "Head",
+    aimMethod = "Auto",
     color = "Cyan"
 }
 
@@ -1007,6 +1015,167 @@ local function render()
     stats.approxSkeletons = approximateCount
 end
 
+
+-- AIMBOT / PHASE 1 -------------------------------------------------------------
+-- Uses the exact same enemy-only target list as ESP; no new scanning,
+-- replication hooks, character writes, weapon modification, or remote calls.
+-- Client camera control is game-dependent and must be confirmed in-game.
+local AIM_RENDER_BIND = "SPECTRA_Aim_" .. tostring(LocalPlayer.UserId)
+local aimMouseMove = type(mousemoverel)=="function" and mousemoverel or nil
+local aimRmbHeld = false
+local aimStatus = "Disabled"
+local aimSelected = nil
+local aimSelectionCount = 0
+local aimBackend = "None"
+local aimUpdates = 0
+local aimErrors = 0
+
+local function getAimPosition(target)
+    local model = target.model
+    if not model or not model.Parent then return nil end
+    local point = state.aimPoint
+    local names
+    if point=="Head" then
+        names={"Head","head"}
+    elseif point=="Chest" then
+        names={"UpperTorso","Torso","Chest","Body"}
+    else
+        names={}
+    end
+    for _,name in ipairs(names) do
+        local part=model:FindFirstChild(name,true)
+        if part and part:IsA("BasePart") then return part.Position end
+    end
+    local ok, cf, size=pcall(function() return model:GetBoundingBox() end)
+    if not ok then
+        return target.root and target.root.Position or nil
+    end
+    if point=="Head" then
+        return cf.Position+Vector3.new(0,size.Y*0.31,0)
+    elseif point=="Chest" then
+        return cf.Position+Vector3.new(0,size.Y*0.12,0)
+    end
+    return cf.Position
+end
+
+local function aimHasLineOfSight(camera,target,position)
+    if not state.aimVisibleOnly then return true end
+    local origin=camera.CFrame.Position
+    local vector=position-origin
+    if vector.Magnitude<0.5 then return false end
+    local exclusions={camera}
+    if LocalPlayer.Character then exclusions[#exclusions+1]=LocalPlayer.Character end
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances=exclusions
+    local hit=Workspace:Raycast(origin,vector,params)
+    return not hit or hit.Instance:IsDescendantOf(target.model)
+end
+
+local function chooseAimTarget(camera)
+    local size=camera.ViewportSize
+    if size.X<1 or size.Y<1 then return nil,nil end
+    local center=Vector2.new(size.X*0.5,size.Y*0.5)
+    local best,bestPoint,bestDelta,bestScore=nil,nil,nil,math.huge
+    aimSelectionCount=0
+    for _,t in ipairs(targets) do
+        local model,root=t.model,t.root
+        if model and model.Parent and root and root.Parent then
+            local playerRelation=t.player and getPlayerRelation(t.player) or "unknown"
+            local groupRelation=getGroupRelation(model)
+            local enemy=(playerRelation=="enemy" or groupRelation=="enemy")
+                and playerRelation~="ally" and groupRelation~="ally"
+            if enemy and (root.Position-camera.CFrame.Position).Magnitude <= MAX_DISTANCE then
+                local point=getAimPosition(t)
+                if point then
+                    local v,onScreen=camera:WorldToViewportPoint(point)
+                    if onScreen and v.Z>0.5 then
+                        local delta=Vector2.new(v.X,v.Y)-center
+                        local d=delta.Magnitude
+                        if d<=state.aimFovRadius and aimHasLineOfSight(camera,t,point) then
+                            aimSelectionCount+=1
+                            if d<bestScore then
+                                best,bestPoint,bestDelta,bestScore=t,point,delta,d
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best,bestPoint,bestDelta
+end
+
+local function updateAimVisual(camera)
+    if not aimFovFrame or not aimFovFrame.Parent then return end
+    local visible=state.aimEnabled and state.aimFovVisible and camera~=nil
+    aimFovFrame.Visible=visible
+    if visible then
+        local radius=state.aimFovRadius
+        local viewport=camera.ViewportSize
+        aimFovFrame.Size=UDim2.fromOffset(radius*2,radius*2)
+        aimFovFrame.Position=UDim2.fromOffset(viewport.X/2-radius,viewport.Y/2-radius)
+    end
+end
+
+local function runAimbot(dt)
+    if not alive or not state.aimEnabled then
+        aimStatus="Disabled"
+        aimSelected=nil
+        return
+    end
+    local camera=Workspace.CurrentCamera
+    if not camera or pickerActive or (window and window.Visible)
+        or UserInputService:GetFocusedTextBox() then
+        aimStatus="Inactive (UI or camera)"
+        aimSelected=nil
+        return
+    end
+    if state.aimHoldRmb and not aimRmbHeld then
+        aimStatus="Hold right mouse button"
+        aimSelected=nil
+        return
+    end
+    local target,point,delta=chooseAimTarget(camera)
+    if not target then
+        aimStatus="No enemy target inside FOV"
+        aimSelected=nil
+        return
+    end
+    aimSelected=target
+    local requested=state.aimMethod
+    local method=(requested=="Auto" and (aimMouseMove and "Mouse" or "Camera")) or requested
+    if method=="Mouse" then
+        if not aimMouseMove then
+            aimStatus="Mouse aiming unavailable in executor"
+            aimBackend="Unavailable"
+            return
+        end
+        -- Aim moves through the input path so custom camera scripts can
+        -- receive relative mouse movement. Sensitivity varies per game.
+        local scale=0.70/math.max(1,state.aimSmoothing)
+        local dx=math.clamp(delta.X*scale,-65,65)
+        local dy=math.clamp(delta.Y*scale,-65,65)
+        local ok,err=pcall(aimMouseMove,dx,dy)
+        if not ok then
+            aimErrors+=1
+            aimBackend="Mouse error"
+            aimStatus="Mouse move failed: "..tostring(err)
+            return
+        end
+        aimBackend="Mouse"
+    else
+        -- Fallback: client camera interpolation; Phantom Forces may overwrite
+        -- this camera transform and it may not affect projectile direction.
+        local desired=CFrame.lookAt(camera.CFrame.Position,point)
+        local alpha=1-math.exp(-dt*30/math.max(1,state.aimSmoothing))
+        camera.CFrame=camera.CFrame:Lerp(desired,math.clamp(alpha,0,1))
+        aimBackend="Camera"
+    end
+    aimUpdates+=1
+    aimStatus="Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")"
+end
+
 -- Bounded source audit, run only when a report is requested.
 -- Does not track or render objects: it exposes why candidate models are excluded.
 local function inspectDataSources()
@@ -1106,6 +1275,12 @@ local function report()
         "Calibration mode: "..calibrationMode,
         "Group events observed: "..tostring(groupEvents),
         "Fixed limits: 1000 studs / 50 Hz target",
+        "Aimbot: "..tostring(state.aimEnabled).." | "..aimStatus,
+        "Aim method: "..state.aimMethod.." | backend: "..aimBackend,
+        "Aim FOV: "..state.aimFovRadius.." px | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
+        "Aim activation: "..(state.aimHoldRmb and "Hold RMB" or "Always when enabled"),
+        "Aim visible-only: "..tostring(state.aimVisibleOnly).." | candidates: "..aimSelectionCount,
+        "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
         "Estimated 2D skeletons shown: "..tostring(stats.approxSkeletons).." (not actual bone poses)",
         "No getgc, hooks, remote scripts, or writes to other character models.",
@@ -1131,6 +1306,8 @@ local function shutdown()
     if not alive then return end
     log("INFO","Unloading SPECTRA and releasing UI/resources")
     alive=false
+    pcall(function() RunService:UnbindFromRenderStep(AIM_RENDER_BIND) end)
+    aimRmbHeld=false
     stopPicker(false)
     for key in pairs(widgets) do destroyWidget(key) end
     for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
@@ -1155,6 +1332,12 @@ if not safeParent(overlayGui) or not safeParent(menuGui) then
     return
 end
 overlayLayer=create("Frame",{Name="WorldMarkers",BackgroundTransparency=1,Size=UDim2.fromScale(1,1),Position=UDim2.fromScale(0,0),ClipsDescendants=true},overlayGui)
+aimFovFrame=create("Frame",{
+    Name="AimFOV",BackgroundTransparency=1,Visible=false,
+    BorderSizePixel=0,Size=UDim2.fromOffset(300,300),ZIndex=5
+},overlayLayer)
+create("UICorner",{CornerRadius=UDim.new(1,0)},aimFovFrame)
+create("UIStroke",{Color=C.accent,Transparency=0.25,Thickness=1},aimFovFrame)
 window=create("Frame",{
     Name="MainWindow",Size=UDim2.fromOffset(660,445),Position=UDim2.new(0.5,-330,0.5,-223),
     BackgroundColor3=C.base,BorderSizePixel=0,ClipsDescendants=true
@@ -1164,7 +1347,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.6.2",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1188,7 +1371,7 @@ statusText=textLabel(footer,"Initializing...",10,C.muted)
 statusText.Position=UDim2.fromOffset(17,4);statusText.Size=UDim2.new(1,-34,1,-8)
 local pages={}
 local tabButtons={}
-for index,name in ipairs({"ESP","Settings","Debug"}) do
+for index,name in ipairs({"Aimbot","ESP","Settings","Debug"}) do
     local b=create("TextButton",{
         Text=name,TextSize=12,Font=Enum.Font.GothamMedium,
         TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,
@@ -1264,6 +1447,102 @@ local function action(page,label,callback)
     connect(b.MouseButton1Click,function() safeCall(label,callback) end)
     return b
 end
+
+local function settingSlider(page,name,description,key,minimum,maximum,step,unit)
+    local f=create("Frame",{Size=UDim2.new(1,-3,0,77),BackgroundColor3=C.panel,BorderSizePixel=0},page)
+    round(f,6)
+    local caption=textLabel(f,name,12,C.white,true)
+    caption.Position=UDim2.fromOffset(13,6)
+    caption.Size=UDim2.new(1,-115,0,19)
+    local hint=textLabel(f,description,10,C.muted)
+    hint.Position=UDim2.fromOffset(13,26)
+    hint.Size=UDim2.new(1,-26,0,15)
+    local valueText=textLabel(f,"",11,C.accent,true)
+    valueText.Position=UDim2.new(1,-99,0,7)
+    valueText.Size=UDim2.fromOffset(85,18)
+    valueText.TextXAlignment=Enum.TextXAlignment.Right
+    local rail=create("Frame",{
+        Position=UDim2.new(0,14,1,-20),Size=UDim2.new(1,-28,0,5),
+        BackgroundColor3=C.border,BorderSizePixel=0
+    },f)
+    round(rail,3)
+    local fill=create("Frame",{Size=UDim2.fromScale(0,1),BackgroundColor3=C.accent,BorderSizePixel=0},rail)
+    round(fill,3)
+    local hitbox=create("TextButton",{
+        Text="",BackgroundTransparency=1,Position=UDim2.new(0,8,1,-30),
+        Size=UDim2.new(1,-16,0,27),BorderSizePixel=0
+    },f)
+    local active=false
+    local function refresh()
+        local value=state[key]
+        local percent=math.clamp((value-minimum)/(maximum-minimum),0,1)
+        fill.Size=UDim2.fromScale(percent,1)
+        valueText.Text=tostring(value)..(unit or "")
+    end
+    local function adjust(x)
+        local left=rail.AbsolutePosition.X
+        local width=math.max(1,rail.AbsoluteSize.X)
+        local fraction=math.clamp((x-left)/width,0,1)
+        local value=minimum+math.floor((maximum-minimum)*fraction/step+0.5)*step
+        state[key]=math.clamp(value,minimum,maximum)
+        refresh()
+    end
+    connect(hitbox.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then
+            active=true
+            adjust(input.Position.X)
+        end
+    end)
+    connect(UserInputService.InputChanged,function(input)
+        if active and input.UserInputType==Enum.UserInputType.MouseMovement then
+            adjust(input.Position.X)
+        end
+    end)
+    connect(UserInputService.InputEnded,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then active=false end
+    end)
+    refresh()
+end
+
+local aimPage=pages.Aimbot
+header(aimPage,"Aimbot","Smooth aim assist using confirmed enemy targets")
+groupLabel(aimPage,"TARGETING")
+toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
+toggle(aimPage,"Hold right mouse","Aim only while holding right mouse button","aimHoldRmb")
+toggle(aimPage,"Visibility check","Only aim at unobstructed targets","aimVisibleOnly")
+local aimPointButton
+aimPointButton=action(aimPage,"Aim point: Head",function()
+    local order={"Head","Chest","Center"}
+    local nextIndex=1
+    for i,value in ipairs(order) do
+        if state.aimPoint==value then nextIndex=i%#order+1; break end
+    end
+    state.aimPoint=order[nextIndex]
+    aimPointButton.Text="Aim point: "..state.aimPoint
+    log("INFO","Aimbot aim point: "..state.aimPoint)
+end)
+groupLabel(aimPage,"CONTROL")
+settingSlider(aimPage,"FOV radius","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
+settingSlider(aimPage,"Smoothing","1 = faster, 20 = more gradual","aimSmoothing",1,20,1,"")
+toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
+local aimMethodButton
+aimMethodButton=action(aimPage,"Aim method: Auto",function()
+    local modes={"Auto","Mouse","Camera"}
+    local nextIndex=1
+    for i,value in ipairs(modes) do
+        if state.aimMethod==value then nextIndex=i%#modes+1; break end
+    end
+    state.aimMethod=modes[nextIndex]
+    aimMethodButton.Text="Aim method: "..state.aimMethod
+    log("INFO","Aimbot method: "..state.aimMethod)
+end)
+row(aimPage,"Runtime compatibility","Mouse method requires executor support; camera mode is game-dependent")
+groupLabel(aimPage,"STATUS")
+local aimStatusRow=row(aimPage,"Status","Disabled")
+local aimStatusLabel=aimStatusRow:FindFirstChildWhichIsA("TextLabel")
+-- Prefer a separate read-only status line so UI value is always current.
+local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
+aimStatusText.Size=UDim2.new(1,-3,0,24)
 
 local espPage=pages.ESP
 header(espPage,"Player visuals","Configure your in-game overlay")
@@ -1356,8 +1635,9 @@ local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=1
 round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, probe, sources, team, calibrate, clearteam, targets, recenter, esp on, esp off, clear, unload")
-    elseif input=="status" then log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
+    if input=="help" then log("INFO","Commands: help, status, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+    elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
+        log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
     elseif input=="sources" then
         local sourceLines=inspectDataSources()
@@ -1374,6 +1654,9 @@ local function runCommand(raw)
             local t=targets[i]
             log("INFO",string.format("%d) %s [%s, %s]",i,t.player and t.player.Name or "calibrated enemy rig",t.source,t.player and "verified" or "group-only"))
         end
+    elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
+    elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
+    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates)
     elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
     elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
     elseif input=="clear" then table.clear(logs);logBox.Text=""
@@ -1402,8 +1685,12 @@ connect(UserInputService.InputChanged,function(input)
 end)
 connect(UserInputService.InputEnded,function(input)
     if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
+    if input.UserInputType==Enum.UserInputType.MouseButton2 then aimRmbHeld=false end
 end)
 connect(UserInputService.InputBegan,function(input,gameProcessed)
+    if input.UserInputType==Enum.UserInputType.MouseButton2 then
+        aimRmbHeld=not gameProcessed and not (window and window.Visible)
+    end
     if gameProcessed or UserInputService:GetFocusedTextBox() then return end
     if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
         shutdown()
@@ -1435,8 +1722,12 @@ connect(RunService.RenderStepped,function(dt)
         renderAccumulator = renderAccumulator % UPDATE_PERIOD
         safeCall("Render",render)
     end
+    updateAimVisual(Workspace.CurrentCamera)
     if statAccumulator>=0.7 then
         statAccumulator=0
+        if aimStatusText and aimStatusText.Parent then
+            aimStatusText.Text=aimStatus
+        end
         if statusText and statusText.Parent then
             statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
@@ -1460,7 +1751,19 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.6.2 loaded. 2D boxes removed | F8: debug | Ctrl+End: unload")
+local aimBindOk,aimBindError=pcall(function()
+    RunService:BindToRenderStep(AIM_RENDER_BIND,Enum.RenderPriority.Camera.Value+5,function(dt)
+        local ok,err=pcall(runAimbot,dt)
+        if not ok then
+            aimErrors+=1
+            if aimErrors<=3 then log("ERROR","Aimbot update failed: "..tostring(err)) end
+        end
+    end)
+end)
+if not aimBindOk then
+    log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
+end
+log("INFO","SPECTRA Phase 1 v1.7 loaded. Aimbot tab added | Hold RMB to aim | F8: debug | Ctrl+End: unload")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
