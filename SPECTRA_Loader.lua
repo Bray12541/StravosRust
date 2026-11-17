@@ -1,4 +1,4 @@
--- SPECTRA v1.1 remote loader
+-- SPECTRA remote loader (version-independent)
 -- Runs the latest SPECTRA source from the spectra-loader GitHub branch.
 local RAW_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
 
