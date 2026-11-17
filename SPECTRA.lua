@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.4.0
+    SPECTRA / PHASE 1                         v1.4.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.4.0"
+local VERSION = "1.4.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -521,29 +521,75 @@ local function calibrateEnemyFromCrosshair()
     local size = camera.ViewportSize
     local ray = camera:ViewportPointToRay(size.X/2,size.Y/2)
     local result = Workspace:Raycast(ray.Origin,ray.Direction*MAX_DISTANCE,params)
-    if not result then
-        log("WARN","Calibration missed: aim directly at a visible enemy rig, then press F6")
-        return
-    end
-    local part = result.Instance
-    local group = getTeamGroup(part)
-    if not group then
-        log("WARN","Calibration hit non-player geometry. Aim at a visible enemy body, not a wall.")
-        return
-    end
-    local current, foundRig = part, false
-    while current and current ~= group do
-        if current:IsA("Model") then
-            local ok = validModel(current)
-            if ok then
-                foundRig = true
-                break
+    local group, foundRig = nil, false
+    if result then
+        group = getTeamGroup(result.Instance)
+        if group then
+            local current = result.Instance
+            while current and current ~= group do
+                if current:IsA("Model") and validModel(current) then
+                    foundRig = true
+                    break
+                end
+                current = current.Parent
             end
         end
-        current = current.Parent
     end
     if not foundRig then
-        log("WARN","Calibration hit a group object but no valid player rig. Try aiming at their torso.")
+        -- Some custom rigs do not receive raycasts. Look for a unique,
+        -- queryable *visual position* near the crosshair instead, and never
+        -- select an object located behind the raycast obstruction.
+        group = nil
+        local root = Workspace:FindFirstChild("Players")
+        local bestScore, secondScore = math.huge, math.huge
+        local bestGroup = nil
+        local checked = 0
+        local obstructionDistance = result and (result.Position-ray.Origin).Magnitude or MAX_DISTANCE
+        if root then
+            local queue = {{root,0}}
+            local index = 1
+            while index <= #queue and checked < 700 do
+                local item = queue[index]
+                index += 1
+                local node, depth = item[1], item[2]
+                for _, object in ipairs(node:GetChildren()) do
+                    checked += 1
+                    if checked >= 700 then break end
+                    if object:IsA("Folder") and depth < 3 then
+                        queue[#queue+1] = {object,depth+1}
+                    elseif object:IsA("Model") then
+                        local ok, modelRoot = validModel(object)
+                        if ok then
+                            local distance = (modelRoot.Position-ray.Origin).Magnitude
+                            if distance > 2 and distance < MAX_DISTANCE and distance <= obstructionDistance+5 then
+                                local projected, onScreen = camera:WorldToViewportPoint(modelRoot.Position)
+                                if onScreen and projected.Z > 0 then
+                                    local pxDist = (Vector2.new(projected.X,projected.Y)-Vector2.new(size.X/2,size.Y/2)).Magnitude
+                                    if pxDist <= 55 then
+                                        local score = pxDist + distance*0.003
+                                        if score < bestScore then
+                                            secondScore = bestScore
+                                            bestScore = score
+                                            bestGroup = getTeamGroup(object)
+                                        elseif score < secondScore then
+                                            secondScore = score
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if depth < 2 then queue[#queue+1] = {object,depth+1} end
+                    end
+                end
+            end
+        end
+        if bestGroup and (secondScore == math.huge or secondScore > bestScore + 10) then
+            group = bestGroup
+            foundRig = true
+        end
+    end
+    if not group or not foundRig then
+        log("WARN","Could not identify a unique visible player under the crosshair. Aim closer at an enemy torso and press F6.")
         return
     end
     calibratedEnemyGroup = group
@@ -840,7 +886,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.4.0",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.4.1",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1153,7 +1199,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.4 loaded. Right Shift: menu | F6: calibrate enemy group | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.4.1 loaded. Right Shift: menu | F6: calibrate enemy group | F8: debug | Ctrl+End: unload")
 log("INFO","No Roblox teams found? Aim at a visible enemy and press F6 to identify their group. Unknown groups stay hidden.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
