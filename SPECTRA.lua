@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.0
+    SPECTRA / PHASE 1                         v1.7.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.0"
+local VERSION = "1.7.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1156,7 +1156,7 @@ local function runAimbot(dt)
         local scale=0.70/math.max(1,state.aimSmoothing)
         local dx=math.clamp(delta.X*scale,-65,65)
         local dy=math.clamp(delta.Y*scale,-65,65)
-        local ok,err=pcall(aimMouseMove,dx,dy)
+        local ok,err=pcall(aimMouseMove,math.floor(dx+0.5),math.floor(dy+0.5))
         if not ok then
             aimErrors+=1
             aimBackend="Mouse error"
@@ -1347,7 +1347,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.1",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1538,9 +1538,6 @@ aimMethodButton=action(aimPage,"Aim method: Auto",function()
 end)
 row(aimPage,"Runtime compatibility","Mouse method requires executor support; camera mode is game-dependent")
 groupLabel(aimPage,"STATUS")
-local aimStatusRow=row(aimPage,"Status","Disabled")
-local aimStatusLabel=aimStatusRow:FindFirstChildWhichIsA("TextLabel")
--- Prefer a separate read-only status line so UI value is always current.
 local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
 aimStatusText.Size=UDim2.new(1,-3,0,24)
 
@@ -1689,7 +1686,7 @@ connect(UserInputService.InputEnded,function(input)
 end)
 connect(UserInputService.InputBegan,function(input,gameProcessed)
     if input.UserInputType==Enum.UserInputType.MouseButton2 then
-        aimRmbHeld=not gameProcessed and not (window and window.Visible)
+        aimRmbHeld=not (window and window.Visible) and not UserInputService:GetFocusedTextBox()
     end
     if gameProcessed or UserInputService:GetFocusedTextBox() then return end
     if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
@@ -1763,7 +1760,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7 loaded. Aimbot tab added | Hold RMB to aim | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.7.1 loaded. Aimbot tab | Hold RMB to aim | F8: debug | Ctrl+End: unload")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
