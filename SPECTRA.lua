@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.5.0
+    SPECTRA / PHASE 1                         v1.5.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.5.0"
+local VERSION = "1.5.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -37,7 +37,7 @@ local logs = {}
 local targets = {}
 local lastSource = "Not scanned"
 local lastScanDetails = "Not scanned"
-local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
+local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, approxSkeletons=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
 local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu
 local focusedTab = "ESP"
 local tabs = {}
@@ -798,6 +798,57 @@ local function updateSkeleton(w, target, camera, color)
         end
     end
 end
+
+-- Custom Phantom Forces rigs may omit Motor6D joints and named limb parts.
+-- When no actual joints are available, use an explicitly estimated stick figure
+-- scaled to the screen-space body bounding box. This is not the true bone pose.
+-- Normalized coordinates (x, y) within the visible character box.
+local ESTIMATED_JOINTS = {
+    {0.50,0.11}, -- 1  head
+    {0.50,0.23}, -- 2  neck
+    {0.50,0.43}, -- 3  chest
+    {0.50,0.60}, -- 4  pelvis
+    {0.26,0.27}, -- 5  left shoulder
+    {0.13,0.43}, -- 6  left elbow
+    {0.09,0.59}, -- 7  left hand
+    {0.74,0.27}, -- 8  right shoulder
+    {0.87,0.43}, -- 9  right elbow
+    {0.91,0.59}, -- 10 right hand
+    {0.37,0.62}, -- 11 left hip
+    {0.34,0.79}, -- 12 left knee
+    {0.32,0.96}, -- 13 left foot
+    {0.63,0.62}, -- 14 right hip
+    {0.66,0.79}, -- 15 right knee
+    {0.68,0.96}, -- 16 right foot
+}
+local ESTIMATED_BONES = {
+    {1,2}, {2,3}, {3,4},
+    {2,5}, {5,6}, {6,7},
+    {2,8}, {8,9}, {9,10},
+    {4,11}, {11,12}, {12,13},
+    {4,14}, {14,15}, {15,16}
+}
+local function updateEstimatedSkeleton(w,left,top,right,bottom,color)
+    local width,height=right-left,bottom-top
+    if width<=2 or height<=4 then
+        for _,line in ipairs(w.skeleton) do line.Visible=false end
+        return
+    end
+    for index,line in ipairs(w.skeleton) do
+        local pair=ESTIMATED_BONES[index]
+        if pair then
+            local a=ESTIMATED_JOINTS[pair[1]]
+            local b=ESTIMATED_JOINTS[pair[2]]
+            put(line,
+                left+width*a[1],top+height*a[2],
+                left+width*b[1],top+height*b[2],
+                color,1)
+        else
+            line.Visible=false
+        end
+    end
+end
+
 local function updateHighlight(w, model, camera, color)
     if not state.highlights then
         if w.highlight then w.highlight:Destroy(); w.highlight=nil end
@@ -829,6 +880,7 @@ local function render()
     local camera = Workspace.CurrentCamera
     if not camera then return end
     local done = 0
+    local approximateCount=0
     for _, t in ipairs(targets) do
         local model = t.model
         local w = widgets[model]
@@ -872,13 +924,19 @@ local function render()
                 local viewport = camera.ViewportSize
                 put(w.tracer,viewport.X/2,viewport.Y-10,(left+right)/2,bottom,clr,1)
             end
-            updateSkeleton(w,t,camera,clr)
+            if state.skeleton and #t.bones == 0 then
+                updateEstimatedSkeleton(w,left,top,right,bottom,clr)
+                approximateCount += 1
+            else
+                updateSkeleton(w,t,camera,clr)
+            end
             updateHighlight(w,model,camera,clr)
         else
             hideWidget(w)
         end
     end
     stats.rendered = done
+    stats.approxSkeletons = approximateCount
 end
 
 -- Bounded source audit, run only when a report is requested.
@@ -979,7 +1037,8 @@ local function report()
         "Calibration: "..calibrationMessage,
         "Group events observed: "..tostring(groupEvents),
         "Fixed limits: 1000 studs / 50 Hz target",
-        "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.matched),
+        "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
+        "Estimated 2D skeletons shown: "..tostring(stats.approxSkeletons).." (not actual bone poses)",
         "No getgc, hooks, remote scripts, or writes to other character models.",
         "-- RECENT LOGS --"
     }
@@ -1035,7 +1094,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.5",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.5.1",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1145,7 +1204,7 @@ toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
 toggle(espPage,"2D boxes","Screen-space rectangles around verified characters","boxes")
 toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
 toggle(espPage,"Tracers","Lines from screen bottom to target boxes","tracers")
-toggle(espPage,"Skeleton","Uses rig Motor6D joints, Bones, or standard limbs where present","skeleton")
+toggle(espPage,"Skeleton","Real rig joints where found; estimated 2D shape otherwise","skeleton")
 toggle(espPage,"3D highlight","Client-only camera-owned highlight, not target-owned","highlights")
 groupLabel(espPage,"ENEMY IDENTIFICATION")
 action(espPage,"Select visible enemy (click to calibrate)",beginPicker)
@@ -1350,7 +1409,7 @@ connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
     log("INFO","Camera changed; optional highlights reset")
 end)
 
-log("INFO","SPECTRA Phase 1 v1.5 loaded. Click Select visible enemy in ESP tab, or F6 | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.5.1 loaded. Skeleton uses real joints or estimated shape | F8: debug | Ctrl+End: unload")
 log("INFO","No Roblox team data: Select visible enemy and click body to calibrate. Unknown groups stay hidden.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
