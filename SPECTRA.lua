@@ -2942,6 +2942,8 @@ local function launchSpectraUI()
 
     selectTab("ESP")
     clampWindow(true)
+    local compatElapsed=0
+    local compatAutoSamples=0
     -- Dragging is limited to the header; no changes to Roblox input state.
     local dragging=false
     local dragStart, windowStart
@@ -2990,6 +2992,14 @@ local function launchSpectraUI()
 
     connect(RunService.RenderStepped,function(dt)
         if not alive then return end
+        compatElapsed+=dt
+        -- Two bounded follow-up snapshots catch delayed character replication
+        -- after the initial read-only startup snapshot. No continuous logging.
+        if compatAutoSamples<2
+            and compatElapsed >= (compatAutoSamples==0 and 6 or 20) then
+            compatAutoSamples+=1
+            safeCall("Compatibility follow-up snapshot",Compat.emit)
+        end
         updateInputDiagnostics(dt)
         stats.fps=stats.fps==0 and (1/math.max(0.001,dt)) or (stats.fps*0.92 + (1/math.max(0.001,dt))*0.08)
         scanAccumulator += dt
