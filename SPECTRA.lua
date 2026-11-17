@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.18.0
+    SPECTRA / PHASE 1                         v1.19.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.18.0"
+local VERSION = "1.19.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -82,10 +82,11 @@ local state = {
     aimStyle = "Snap",
     aimSnapStrength = 100,
     aimVisibleOnly = false,
-    aimKey = "Right Mouse",
+    aimKey = "Always",
     aimSticky = true,
+    aimLock = true,
     aimPoint = "Head",
-    aimMethod = "Auto",
+    aimMethod = "Stabilized",
     speedHack = false, speedValue = 32,
     infiniteJump = false,
     noFallDamage = false,
@@ -1081,6 +1082,9 @@ local aimKeyHeld={["Left Alt"]=false,["X"]=false}
 local aimStatus = "Disabled"
 local aimSelected = nil
 local aimSelectionCount = 0
+local aimLockAcquisitions = 0
+local aimLockRetainedFrames = 0
+local aimLockReleases = 0
 local aimMetrics={targetSwitches=0,mouseWrites=0,mouseErrors=0,
     lastMouseDX=0,lastMouseDY=0,lastMethod="None",
     snapFrames=0,screenErrorPx=0,cameraSnapWrites=0}
@@ -1275,6 +1279,52 @@ local function aimHasLineOfSight(camera,target,position)
     return not hit or hit.Instance:IsDescendantOf(target.model)
 end
 
+-- The FOV constrains first acquisition; after locking, a living eligible target
+-- remains tracked even when mouse movement puts it outside the FOV circle.
+-- This never discovers new entities or bypasses game-side replication.
+local function getPersistentAimTarget(camera)
+    if not state.aimLock or not aimSelected or not aimSelected.model then return nil,nil,nil end
+    local lockedModel=aimSelected.model
+    if not lockedModel:IsDescendantOf(Workspace) then return nil,nil,nil end
+    -- Discovery refreshes target records; resolve against its newest snapshot.
+    local trackedTarget=nil
+    for _,candidate in ipairs(targets) do
+        if candidate.model==lockedModel then
+            trackedTarget=candidate
+            break
+        end
+    end
+    if not trackedTarget or not trackedTarget.root or not trackedTarget.root.Parent then
+        return nil,nil,nil
+    end
+    local root=trackedTarget.root
+    local origin=camera.CFrame.Position
+    if (root.Position-origin).Magnitude>MAX_DISTANCE then return nil,nil,nil end
+    local playerRelation=trackedTarget.player and getPlayerRelation(trackedTarget.player) or "unknown"
+    local groupRelation=getGroupRelation(lockedModel)
+    local isEnemy=(playerRelation=="enemy" or groupRelation=="enemy")
+        and playerRelation~="ally" and groupRelation~="ally"
+    if not isEnemy then return nil,nil,nil end
+    local humanoid=lockedModel:FindFirstChildOfClass("Humanoid")
+    if humanoid and humanoid.Health<=0 then return nil,nil,nil end
+
+    local bestPosition,bestAngle=nil,math.huge
+    for _,position in ipairs(getAimPositions(trackedTarget)) do
+        local difference=position-origin
+        if difference.Magnitude>0.5 and aimHasLineOfSight(camera,trackedTarget,position) then
+            local angle=angleBetween(camera.CFrame.LookVector,difference.Unit)
+            if angle<bestAngle then
+                bestPosition,bestAngle=position,angle
+            end
+        end
+    end
+    if not bestPosition then return nil,nil,nil end
+    local projected=camera:WorldToViewportPoint(bestPosition)
+    local viewport=camera.ViewportSize
+    local delta=Vector2.new(projected.X-viewport.X*0.5,projected.Y-viewport.Y*0.5)
+    return trackedTarget,bestPosition,delta
+end
+
 local function chooseAimTarget(camera)
     aimTargetProbe={enemies=0,onScreen=0,insideFov=0,eligible=0,blocked=0}
     local size=camera.ViewportSize
@@ -1289,7 +1339,9 @@ local function chooseAimTarget(camera)
             local groupRelation=getGroupRelation(model)
             local enemy=(playerRelation=="enemy" or groupRelation=="enemy")
                 and playerRelation~="ally" and groupRelation~="ally"
-            if enemy and (root.Position-camera.CFrame.Position).Magnitude <= MAX_DISTANCE then
+            local humanoid=model:FindFirstChildOfClass("Humanoid")
+            if enemy and (not humanoid or humanoid.Health>0)
+                and (root.Position-camera.CFrame.Position).Magnitude <= MAX_DISTANCE then
                 aimTargetProbe.enemies+=1
                 local onScreenAny,inFovAny,blockedAny=false,false,false
                 local nearestPoint,nearestDelta,nearestDistance=nil,nil,math.huge
@@ -1407,16 +1459,28 @@ local function runAimbot(dt)
         aimSelected=nil
         return
     end
-    local target,point,delta=chooseAimTarget(camera)
+    local previous=aimSelected
+    local target,point,delta=getPersistentAimTarget(camera)
+    if target then
+        aimLockRetainedFrames+=1
+    else
+        if previous and state.aimLock then aimLockReleases+=1 end
+        -- Acquire a new enemy only within FOV; keep it even after the
+        -- player moves their mouse away or the target leaves that circle.
+        target,point,delta=chooseAimTarget(camera)
+    end
     if not target then
         recordAimGate("noTarget",state.aimVisibleOnly
-            and "No enemy inside FOV with clear line of sight"
-            or "No projected enemy target inside FOV",true)
+            and "No eligible enemy inside FOV with clear line of sight"
+            or "No eligible enemy inside FOV to lock",true)
         aimSelected=nil
         return
     end
-    if aimSelected and aimSelected.model~=target.model then
+    if previous and previous.model~=target.model then
         aimMetrics.targetSwitches+=1
+    end
+    if state.aimLock and (not previous or previous.model~=target.model) then
+        aimLockAcquisitions+=1
     end
     aimSelected=target
     aimMetrics.screenErrorPx=delta.Magnitude
@@ -1523,7 +1587,10 @@ local function runAimbot(dt)
         end
     end
     aimUpdates+=1
-    recordAimGate("tracking","Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")",true)
+    recordAimGate("tracking",
+        (state.aimLock and "LOCKED " or "Tracking ")
+        ..(target.player and target.player.Name or "enemy rig")
+        .." ("..aimBackend..")",true)
 end
 
 
@@ -2699,6 +2766,10 @@ local function report()
         "Aim FOV: "..state.aimFovRadius.." px | style: "..state.aimStyle
             .." | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
         "Aim activation: "..state.aimKey,
+        "Persistent target lock: "..tostring(state.aimLock)
+            .." | acquisitions: "..aimLockAcquisitions
+            .." | held frames: "..aimLockRetainedFrames
+            .." | releases: "..aimLockReleases,
         "Aim requires line of sight: "..tostring(state.aimVisibleOnly)
             .." | eligible candidates: "..aimSelectionCount,
         "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
@@ -2798,7 +2869,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.18.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.19.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2971,7 +3042,7 @@ local function launchSpectraUI()
         aimKeyButton.Text="Aim Key: "..key.." (click to rebind)"
         log("INFO","Aimbot activation key: "..key)
     end
-    aimKeyButton=action(aimPage,"Aim Key: Right Mouse (click to rebind)",function()
+    aimKeyButton=action(aimPage,"Aim Key: Always (click to rebind)",function()
         aimKeyCapture=true
         aimKeyButton.Text="Press keyboard key or RMB (Esc cancels)"
     end)
@@ -3002,7 +3073,8 @@ local function launchSpectraUI()
         applyAimKey(key)
     end)
     toggle(aimPage,"Visibility Check","Require clear line of sight (off = track behind cover)","aimVisibleOnly")
-    toggle(aimPage,"Sticky targets","Prefer the previous enemy to reduce rapid target switching","aimSticky")
+    toggle(aimPage,"Persistent target lock","Keep the acquired character locked even outside FOV and pull aim back after mouse movement","aimLock")
+    toggle(aimPage,"Sticky targets","Prefer the previous enemy when persistent lock is off","aimSticky")
     local aimPointButton
     aimPointButton=action(aimPage,"Target Bone: Head",function()
         local order={"Head","Chest","Nearest"}
@@ -3026,7 +3098,7 @@ local function launchSpectraUI()
     settingSlider(aimPage,"Smoothness","Only affects Smooth style (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
     toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
     local aimMethodButton
-    aimMethodButton=action(aimPage,"Aim method: Auto",function()
+    aimMethodButton=action(aimPage,"Aim method: Stabilized",function()
         local modes={"Auto","Mouse","Camera","Stabilized"}
         local nextIndex=1
         for i,value in ipairs(modes) do
@@ -3036,7 +3108,8 @@ local function launchSpectraUI()
         aimMethodButton.Text="Aim method: "..state.aimMethod
         log("INFO","Aimbot method: "..state.aimMethod)
     end)
-    row(aimPage,"Cover behavior","With clear LOS OFF, targets behind structures remain eligible inside the FOV circle. Bullets do not pass through walls.")
+    row(aimPage,"Lock behavior","First target must be inside FOV. A valid locked enemy stays selected outside FOV; it releases if lost, defeated or filtered.")
+    row(aimPage,"Cover behavior","With Visibility Check off, a locked target can remain selected behind geometry. Bullets still obey game collisions.")
     row(aimPage,"Runtime compatibility","Snap uses fast relative mouse input on Scriptable cameras or instant camera correction otherwise; weapon/reticle response unverified.")
     groupLabel(aimPage,"AIMBOT DIAGNOSTICS")
     action(aimPage,"Print Aimbot diagnostics to Roblox logs",function()
@@ -3053,7 +3126,11 @@ local function launchSpectraUI()
             .." | "..calibrationMessage)
         print("[SPECTRA AIM] Aim Key: "..state.aimKey
             .." | Target Bone: "..state.aimPoint
-            .." | Visibility Check: "..tostring(state.aimVisibleOnly))
+            .." | Visibility Check: "..tostring(state.aimVisibleOnly)
+            .." | Persistent Lock: "..tostring(state.aimLock)
+            .." | Acquired: "..aimLockAcquisitions
+            .." | Retained frames: "..aimLockRetainedFrames
+            .." | Releases: "..aimLockReleases)
         for _,entry in ipairs(getInputDiagnosticsLines()) do
             if entry:find("Aimbot",1,true)
                 or entry:find("Aim ",1,true)
@@ -3475,7 +3552,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.18.0 loaded. Bindable Aim Key, Head/Chest/Nearest bones, FOV, smoothness and visibility settings")
+    log("INFO","SPECTRA Phase 1 v1.19.0 loaded. Persistent aim lock and always-active tracking available")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
