@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.6
+    SPECTRA / PHASE 1                         v1.7.7
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.6"
+local VERSION = "1.7.7"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -73,7 +73,7 @@ local state = {
     enabled = true,
     distances = true,
     tracers = false,
-    skeleton = false,
+    skeleton = true,
     highlights = false,
     aimEnabled = false,
     aimFovVisible = true,
@@ -1663,7 +1663,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.6",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.7",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2128,7 +2128,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.6 loaded. Experimental Scriptable-camera stabilization; test in-game | F8: debug")
+log("INFO","SPECTRA Phase 1 v1.7.7 loaded. ESP and Skeleton default ON | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
