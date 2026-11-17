@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.8.0
+    SPECTRA / PHASE 1                         v1.9.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.8.0"
+local VERSION = "1.9.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -85,6 +85,13 @@ local state = {
     aimMethod = "Auto",
     noRecoil = false,
     recoilStrength = 100,
+    speedHack = false, speedValue = 32,
+    fly = false, flySpeed = 45,
+    noclip = false, infiniteJump = false,
+    highJump = false, jumpPower = 96,
+    bunnyHop = false, noFallDamage = false,
+    spinbot = false, spinRate = 300,
+    antiAim = false,
     color = "Cyan"
 }
 
@@ -1550,6 +1557,285 @@ local function updateRecoilModifier()
     compensateRecoilCamera(camera,false)
 end
 
+
+-- MOVEMENT MODIFIERS: verified self-rig only. A custom game controller
+-- can reject every local property write; never manipulate unidentified rigs.
+local movement={
+    model=nil,root=nil,humanoid=nil,status="No verified local character",source="none",
+    saved=nil,lastScan=0,lastJump=0,lastHop=0,spinAngle=0,errors=0,
+    originalHum=nil,collisions=setmetatable({},{__mode="k"}),
+    writes={speed=0,fly=0,noclip=0,jump=0,fall=0,tp=0,spin=0,anti=0}
+}
+local movementStatusText=nil
+
+local function movementHasModes()
+    return state.speedHack or state.fly or state.noclip or state.infiniteJump
+        or state.highJump or state.bunnyHop or state.noFallDamage
+        or state.spinbot or state.antiAim
+end
+
+local function restoreMovement()
+    local old=movement.originalHum
+    if old and old.h and old.h.Parent then
+        pcall(function()
+            old.h.WalkSpeed=old.walk
+            old.h.JumpPower=old.jump
+            old.h.JumpHeight=old.height
+            old.h.UseJumpPower=old.useJump
+            old.h.PlatformStand=old.stand
+        end)
+    end
+    movement.originalHum=nil
+    for part,collision in pairs(movement.collisions) do
+        if part and part.Parent then
+            pcall(function() part.CanCollide=collision end)
+        end
+        movement.collisions[part]=nil
+    end
+end
+
+local function setMovementRig(model,source)
+    if not model or not model.Parent or not model:IsA("Model") then return false end
+    if model~=LocalPlayer.Character and identifyPlayer(model)~=LocalPlayer then return false end
+    local root=getRoot(model)
+    if not root or not root:IsA("BasePart") or not root.Parent then return false end
+    if model~=movement.model or root~=movement.root then
+        restoreMovement()
+        movement.model=model
+        movement.root=root
+        movement.humanoid=model:FindFirstChildWhichIsA("Humanoid",true)
+        movement.source=source
+    end
+    movement.status="Verified local character ("..source..")"
+    return true
+end
+
+local function findMovementRig(force)
+    if not force and movement.root and movement.root.Parent and movement.model and movement.model.Parent
+        and (movement.model==LocalPlayer.Character or identifyPlayer(movement.model)==LocalPlayer) then
+        return movement.model,movement.root,movement.humanoid
+    end
+    if not force and os.clock()-movement.lastScan<0.8 then return nil,nil,nil end
+    movement.lastScan=os.clock()
+    if setMovementRig(LocalPlayer.Character,"Player.Character") then
+        return movement.model,movement.root,movement.humanoid
+    end
+    local camera=Workspace.CurrentCamera
+    local subject=camera and camera.CameraSubject
+    if subject then
+        local ancestor=subject:IsA("Model") and subject or subject:FindFirstAncestorWhichIsA("Model")
+        if setMovementRig(ancestor,"identified CameraSubject") then
+            return movement.model,movement.root,movement.humanoid
+        end
+    end
+    local folder=Workspace:FindFirstChild("Players")
+    if folder then
+        local queue={{folder,0}}
+        local i,examined=1,0
+        while i<=#queue and examined<300 do
+            local node,depth=queue[i][1],queue[i][2]
+            i+=1
+            for _,child in ipairs(node:GetChildren()) do
+                examined+=1
+                if examined>=300 then break end
+                if child:IsA("Model") then
+                    if setMovementRig(child,"verified Workspace.Players") then
+                        return movement.model,movement.root,movement.humanoid
+                    end
+                    if depth<2 then queue[#queue+1]={child,depth+1} end
+                elseif child:IsA("Folder") and depth<3 then
+                    queue[#queue+1]={child,depth+1}
+                end
+            end
+        end
+    end
+    if movement.model or movement.originalHum then restoreMovement() end
+    movement.model=nil;movement.root=nil;movement.humanoid=nil
+    movement.source="none"
+    movement.status="Unavailable: no positively identified local rig"
+    return nil,nil,nil
+end
+
+local function movementDirection()
+    local c=Workspace.CurrentCamera
+    if not c then return Vector3.zero end
+    local front=Vector3.new(c.CFrame.LookVector.X,0,c.CFrame.LookVector.Z)
+    local right=Vector3.new(c.CFrame.RightVector.X,0,c.CFrame.RightVector.Z)
+    if front.Magnitude<0.01 or right.Magnitude<0.01 then return Vector3.zero end
+    front=front.Unit;right=right.Unit
+    local d=Vector3.zero
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) then d+=front end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) then d-=front end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then d+=right end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then d-=right end
+    return d.Magnitude>0 and d.Unit or Vector3.zero
+end
+
+local function movementGrounded(root,h,range)
+    if h and h.FloorMaterial~=Enum.Material.Air then return true end
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances=movement.model and {movement.model} or {}
+    return Workspace:Raycast(root.Position,Vector3.new(0,-(range or 4.5),0),params)~=nil
+end
+
+local function movementJump()
+    local _,root,h=findMovementRig(false)
+    if not root then return end
+    local v=root.AssemblyLinearVelocity
+    if h then pcall(function() h.Jump=true;h:ChangeState(Enum.HumanoidStateType.Jumping) end) end
+    root.AssemblyLinearVelocity=Vector3.new(v.X,math.max(v.Y,state.highJump and state.jumpPower or 49),v.Z)
+    movement.writes.jump+=1
+end
+
+local function movementJumpRequested()
+    if not (state.infiniteJump or state.highJump) then return end
+    if os.clock()-movement.lastJump<0.15 then return end
+    local _,root,h=findMovementRig(false)
+    if not root then return end
+    if state.infiniteJump or movementGrounded(root,h) then
+        movement.lastJump=os.clock()
+        local ok=pcall(movementJump)
+        if not ok then movement.errors+=1 end
+    end
+end
+
+local function movementSavePosition()
+    local model=findMovementRig(true)
+    if not model then log("WARN",movement.status);return end
+    movement.saved=model:GetPivot()
+    log("INFO","Saved verified local position for teleport")
+end
+
+local function movementTeleport(target)
+    local model=findMovementRig(true)
+    if not model then log("WARN",movement.status);return end
+    if typeof(target)~="CFrame" then return end
+    if (target.Position-model:GetPivot().Position).Magnitude>5000 then
+        log("WARN","Teleport rejected: over 5000 studs");return
+    end
+    local ok,err=pcall(function() model:PivotTo(target) end)
+    if ok then
+        movement.writes.tp+=1
+        movement.status="Teleport attempted; server may restore position"
+        log("INFO","Teleport attempted on verified local rig")
+    else
+        movement.errors+=1
+        log("ERROR","Teleport error: "..tostring(err))
+    end
+end
+
+local function movementTeleportSaved()
+    if movement.saved then movementTeleport(movement.saved)
+    else log("WARN","No saved position; use Save position first") end
+end
+
+local function movementTeleportForward()
+    local model=findMovementRig(true)
+    local camera=Workspace.CurrentCamera
+    if not model or not camera then log("WARN",movement.status);return end
+    local dir=Vector3.new(camera.CFrame.LookVector.X,0,camera.CFrame.LookVector.Z)
+    if dir.Magnitude<0.1 then return end
+    dir=dir.Unit
+    local pivot=model:GetPivot()
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances={model}
+    local hit=Workspace:Raycast(pivot.Position,dir*30,params)
+    local distance=hit and (hit.Position-pivot.Position).Magnitude-4 or 30
+    if distance<2 then log("WARN","Forward teleport blocked");return end
+    movementTeleport(pivot+dir*distance)
+end
+
+local function movementReport()
+    local w=movement.writes
+    return string.format(
+        "Movement: %s | source=%s | saved=%s\nSpeed=%s Fly=%s Noclip=%s InfiniteJump=%s HighJump=%s BunnyHop=%s NoFallDamage=%s Spinbot=%s AntiAim=%s\n"..
+        "Write attempts: speed=%d fly=%d noclip=%d jump=%d fall=%d teleport=%d spin=%d anti=%d | errors=%d\n"..
+        "Client-side movement changes may be rejected or reset; no server immunity/hitbox changes.",
+        movement.status,movement.source,movement.saved and "yes" or "no",
+        tostring(state.speedHack),tostring(state.fly),tostring(state.noclip),
+        tostring(state.infiniteJump),tostring(state.highJump),tostring(state.bunnyHop),
+        tostring(state.noFallDamage),tostring(state.spinbot),tostring(state.antiAim),
+        w.speed,w.fly,w.noclip,w.jump,w.fall,w.tp,w.spin,w.anti,movement.errors)
+end
+
+local function updateMovement(dt)
+    if not alive then return end
+    if not movementHasModes() then
+        if movement.originalHum or next(movement.collisions) then restoreMovement() end
+        movement.status="Movement modifiers off"
+        return
+    end
+    local model,root,h=findMovementRig(false)
+    if not root then return end
+    if root.Anchored then movement.status="Unavailable: local root anchored";return end
+    if h and not movement.originalHum then
+        movement.originalHum={h=h,walk=h.WalkSpeed,jump=h.JumpPower,
+            height=h.JumpHeight,useJump=h.UseJumpPower,stand=h.PlatformStand}
+    end
+    local old=movement.originalHum
+    if h and old then
+        if state.speedHack then
+            h.WalkSpeed=state.speedValue;movement.writes.speed+=1
+        else h.WalkSpeed=old.walk end
+        if state.highJump then
+            h.UseJumpPower=true;h.JumpPower=state.jumpPower
+        else h.JumpPower=old.jump;h.JumpHeight=old.height;h.UseJumpPower=old.useJump end
+        h.PlatformStand=state.fly or old.stand
+    end
+    if state.noclip then
+        for _,part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if movement.collisions[part]==nil then movement.collisions[part]=part.CanCollide end
+                if part.CanCollide then part.CanCollide=false;movement.writes.noclip+=1 end
+            end
+        end
+    else
+        for part,collision in pairs(movement.collisions) do
+            if part.Parent then part.CanCollide=collision end
+            movement.collisions[part]=nil
+        end
+    end
+    local dir=movementDirection()
+    local v=root.AssemblyLinearVelocity
+    if state.fly then
+        local up=0
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then up+=1 end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then up-=1 end
+        local desired=dir+Vector3.new(0,up,0)
+        root.AssemblyLinearVelocity=(desired.Magnitude>1 and desired.Unit or desired)*state.flySpeed
+        movement.writes.fly+=1
+    elseif state.speedHack and not h and dir.Magnitude>0 then
+        root.AssemblyLinearVelocity=Vector3.new(dir.X*state.speedValue,v.Y,dir.Z*state.speedValue)
+        movement.writes.speed+=1
+    end
+    if state.bunnyHop and not state.fly and dir.Magnitude>0
+        and os.clock()-movement.lastHop>0.22 and movementGrounded(root,h) then
+        movement.lastHop=os.clock();movementJump()
+    end
+    if state.noFallDamage and not state.fly then
+        local fall=root.AssemblyLinearVelocity
+        if fall.Y < -32 and movementGrounded(root,nil,7) then
+            root.AssemblyLinearVelocity=Vector3.new(fall.X,-12,fall.Z)
+            movement.writes.fall+=1
+        end
+    end
+    if state.spinbot or state.antiAim then
+        local yaw
+        if state.spinbot then
+            movement.spinAngle+=math.rad(state.spinRate)*dt
+            yaw=movement.spinAngle
+            movement.writes.spin+=1
+        else
+            yaw=math.sin(os.clock()*20)*math.rad(35)
+            movement.writes.anti+=1
+        end
+        root.CFrame=CFrame.new(root.Position)*CFrame.Angles(0,yaw,0)
+    end
+    movement.status="Local changes attempted; verify in-game result"
+end
+
 -- CAMERA & INPUT DIAGNOSTICS ----------------------------------------------
 -- Read-only observations. These measurements cannot tell us what direction
 -- Phantom Forces uses for server-validated shots or prove source-code behavior.
@@ -1865,7 +2151,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.8.0",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.9.0",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
