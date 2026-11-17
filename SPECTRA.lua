@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.7.1
+    SPECTRA / PHASE 1                         v1.7.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.7.1"
+local VERSION = "1.7.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1029,6 +1029,19 @@ local aimSelectionCount = 0
 local aimBackend = "None"
 local aimUpdates = 0
 local aimErrors = 0
+-- Distinguish accepted calls from observable camera movement.
+local aimLastActiveStatus = "Never activated"
+local aimMovementSamples = 0
+local aimCameraMoved = 0
+local aimLastMoveDegrees = 0
+local aimLastAngularError = 0
+local aimLastWrittenCamera = nil
+local aimCameraResetEvents = 0
+local aimLastTargetModel = nil
+
+local function angleBetween(a,b)
+    return math.deg(math.acos(math.clamp(a:Dot(b),-1,1)))
+end
 
 local function getAimPosition(target)
     local model = target.model
@@ -1131,7 +1144,13 @@ local function runAimbot(dt)
         aimSelected=nil
         return
     end
-    if state.aimHoldRmb and not aimRmbHeld then
+    -- Polling remains reliable when the game consumes MouseButton2 events.
+    local rightHeld=aimRmbHeld
+    local inputOK,pressed=pcall(function()
+        return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    end)
+    if inputOK then rightHeld=pressed end
+    if state.aimHoldRmb and not rightHeld then
         aimStatus="Hold right mouse button"
         aimSelected=nil
         return
@@ -1143,8 +1162,10 @@ local function runAimbot(dt)
         return
     end
     aimSelected=target
+    -- Auto prioritizes camera rotation. Merely having mousemoverel() doesn't
+    -- mean the game's custom input/camera accepts synthesized mouse movement.
     local requested=state.aimMethod
-    local method=(requested=="Auto" and (aimMouseMove and "Mouse" or "Camera")) or requested
+    local method=requested=="Auto" and "Camera" or requested
     if method=="Mouse" then
         if not aimMouseMove then
             aimStatus="Mouse aiming unavailable in executor"
@@ -1163,14 +1184,31 @@ local function runAimbot(dt)
             aimStatus="Mouse move failed: "..tostring(err)
             return
         end
-        aimBackend="Mouse"
+        aimBackend="Mouse (unverified)"
+        aimLastActiveStatus="Mouse movement sent; game response unverified"
     else
-        -- Fallback: client camera interpolation; Phantom Forces may overwrite
-        -- this camera transform and it may not affect projectile direction.
-        local desired=CFrame.lookAt(camera.CFrame.Position,point)
+        -- Client camera interpolation: works visually only if the game's
+        -- camera controller permits it. It does not guarantee bullet aiming.
+        local before=camera.CFrame
+        local desired=CFrame.lookAt(before.Position,point)
+        local desiredDir=desired.LookVector
+        aimLastAngularError=angleBetween(before.LookVector,desiredDir)
+        if aimLastWrittenCamera and aimLastTargetModel==target.model then
+            local reset=angleBetween(before.LookVector,aimLastWrittenCamera.LookVector)
+            if reset>2.5 then aimCameraResetEvents+=1 end
+        end
         local alpha=1-math.exp(-dt*30/math.max(1,state.aimSmoothing))
-        camera.CFrame=camera.CFrame:Lerp(desired,math.clamp(alpha,0,1))
+        local nextCF=before:Lerp(desired,math.clamp(alpha,0,1))
+        camera.CFrame=nextCF
+        local after=camera.CFrame
+        aimLastMoveDegrees=angleBetween(before.LookVector,after.LookVector)
+        aimMovementSamples+=1
+        if aimLastMoveDegrees>0.01 then aimCameraMoved+=1 end
+        aimLastWrittenCamera=after
+        aimLastTargetModel=target.model
         aimBackend="Camera"
+        aimLastActiveStatus=string.format("Camera move %.2f deg; aim error %.2f deg; resets %d",
+            aimLastMoveDegrees,aimLastAngularError,aimCameraResetEvents)
     end
     aimUpdates+=1
     aimStatus="Tracking "..(target.player and target.player.Name or "enemy rig").." ("..aimBackend..")"
@@ -1281,6 +1319,9 @@ local function report()
         "Aim activation: "..(state.aimHoldRmb and "Hold RMB" or "Always when enabled"),
         "Aim visible-only: "..tostring(state.aimVisibleOnly).." | candidates: "..aimSelectionCount,
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
+        "Aim last active: "..aimLastActiveStatus,
+        "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
+            .." | suspected overrides: "..aimCameraResetEvents,
         "Skeleton rigs with joints: "..tostring(stats.skeletonRigs).."/"..tostring(stats.discovered),
         "Estimated 2D skeletons shown: "..tostring(stats.approxSkeletons).." (not actual bone poses)",
         "No getgc, hooks, remote scripts, or writes to other character models.",
@@ -1347,7 +1388,7 @@ menu=window
 local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
 local title=textLabel(top,"SPECTRA",16,C.white,true)
 title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.7.1",10,C.muted)
+local sub=textLabel(top,"PLAYER VISUALS  /  1.7.2",10,C.muted)
 sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
 -- Hide only changes menu visibility; ESP keeps running.
 local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -1536,7 +1577,7 @@ aimMethodButton=action(aimPage,"Aim method: Auto",function()
     aimMethodButton.Text="Aim method: "..state.aimMethod
     log("INFO","Aimbot method: "..state.aimMethod)
 end)
-row(aimPage,"Runtime compatibility","Mouse method requires executor support; camera mode is game-dependent")
+row(aimPage,"Runtime compatibility","Auto tries camera; Mouse is manual and may be ignored by the game")
 groupLabel(aimPage,"STATUS")
 local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
 aimStatusText.Size=UDim2.new(1,-3,0,24)
@@ -1653,7 +1694,7 @@ local function runCommand(raw)
         end
     elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
     elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
-    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates)
+    elseif input=="aimstatus" then log("INFO","Aim: "..aimStatus.." | lastActive="..aimLastActiveStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | resets="..aimCameraResetEvents)
     elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
     elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
     elseif input=="clear" then table.clear(logs);logBox.Text=""
@@ -1760,7 +1801,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.7.1 loaded. Aimbot tab | Hold RMB to aim | F8: debug | Ctrl+End: unload")
+log("INFO","SPECTRA Phase 1 v1.7.2 loaded. Auto prioritizes Camera | Aim diagnostic improvements | F8: debug")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
