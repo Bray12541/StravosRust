@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.11.0
+    SPECTRA / PHASE 1                         v1.11.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.11.0"
+local VERSION = "1.11.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -2249,7 +2249,7 @@ local Compat=(function()
             rows[#rows+1]=text
         end
         line("SPECTRA COMPATIBILITY / v"..VERSION.." / "..os.date("%Y-%m-%d %H:%M:%S"))
-        line("Mode: READ-ONLY Roblox-exposed data. No memory, hooks or private controllers.")
+        line("Inspector: READ-ONLY Roblox-exposed data. Manual session confirmation can enable LOCAL modifier attempts; ownership/server effects UNVERIFIED.")
         line("Game PlaceId: "..tostring(readable(function() return game.PlaceId end,"unknown")))
         line("Player instances: "..tostring(readable(function() return #Players:GetPlayers() end,0)))
         line("")
@@ -2818,7 +2818,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3022,7 +3022,7 @@ local function launchSpectraUI()
         log("INFO",Movement.probe())
         log("INFO",Movement.data.status)
     end)
-    row(modifiersPage,"Availability","An ON toggle is a request, not proof of a working modifier")
+    row(modifiersPage,"Availability","Calibrate in Compat; ON does not guarantee a working modifier")
     groupLabel(modifiersPage,"RECOIL")
     toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
     settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
@@ -3113,7 +3113,8 @@ local function launchSpectraUI()
         SelfCalibration.clear("Cleared by user")
     end)
     action(compatPage,"Copy compatibility report",Compat.copy)
-    row(compatPage,"How to use","Press Refresh after spawning or toggling a modifier")
+    row(compatPage,"Safety note","Confirmation is not ownership proof; spectator targets remain possible")
+    row(compatPage,"How to use","Run observation, then manually confirm the camera-followed model")
     local compatReportView=create("TextBox",{
         Text=Compat.text,TextEditable=false,MultiLine=true,ClearTextOnFocus=false,
         Font=Enum.Font.Code,TextSize=10,TextWrapped=true,
@@ -3374,6 +3375,7 @@ local function launchSpectraUI()
             if Movement.statusLabel and Movement.statusLabel.Parent then
                 Movement.statusLabel.Text=Movement.data.status.."\nSource: "..Movement.data.source
                     .." | errors: "..Movement.data.errors
+                    .."\n"..SelfCalibration.statusText()
                 Movement.statusLabel.TextColor3=(Movement.data.root and Movement.data.root.Parent)
                     and C.green or C.orange
             end
@@ -3459,7 +3461,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.11.0 loaded. Session-only, manual camera-character calibration with invalidation guards")
+    log("INFO","SPECTRA Phase 1 v1.11.1 loaded. Session-only manual camera-character calibration, clear UI status, respawn guards")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
