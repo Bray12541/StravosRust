@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.15.0
+    SPECTRA / PHASE 1                         v1.16.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.15.0"
+local VERSION = "1.16.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -79,8 +79,10 @@ local state = {
     aimFovVisible = true,
     aimFovRadius = 150,
     aimSmoothing = 8,
-    aimVisibleOnly = false,
-    aimHoldRmb = true,
+    aimStyle = "Snap",
+    aimSnapStrength = 100,
+    aimVisibleOnly = true,
+    aimHoldRmb = false,
     aimSticky = true,
     aimPoint = "Head",
     aimMethod = "Auto",
@@ -1079,7 +1081,8 @@ local aimStatus = "Disabled"
 local aimSelected = nil
 local aimSelectionCount = 0
 local aimMetrics={targetSwitches=0,mouseWrites=0,mouseErrors=0,
-    lastMouseDX=0,lastMouseDY=0,lastMethod="None"}
+    lastMouseDX=0,lastMouseDY=0,lastMethod="None",
+    snapFrames=0,screenErrorPx=0,cameraSnapWrites=0}
 local aimBackend = "None"
 local aimUpdates = 0
 local aimErrors = 0
@@ -1165,12 +1168,13 @@ local function observeAimCamera(camera)
         aimCorrectionObservations+=1
         -- Bounded reapplication only when another writer has changed CFrame.
         -- Guard and 2-corrections-per-frame cap prevent a recursive event storm.
-        local alpha=math.clamp(0.55/math.sqrt(math.max(1,state.aimSmoothing)),0.15,0.55)
+        local alpha=state.aimStyle=="Snap" and 1
+            or math.clamp(0.55/math.sqrt(math.max(1,state.aimSmoothing)),0.15,0.55)
         local desired=CFrame.lookAt(before.Position,aimCorrectionPoint)
         aimCorrectionGuard=true
         aimCorrectionsThisFrame+=1
         local ok,err=pcall(function()
-            camera.CFrame=before:Lerp(desired,alpha)
+            camera.CFrame=alpha>=1 and desired or before:Lerp(desired,alpha)
         end)
         aimCorrectionGuard=false
         if ok then
@@ -1220,6 +1224,16 @@ local function aimHasLineOfSight(camera,target,position)
     if vector.Magnitude<0.5 then return false end
     local exclusions={camera}
     if LocalPlayer.Character then exclusions[#exclusions+1]=LocalPlayer.Character end
+    -- FPS games may omit LocalPlayer.Character. The camera-followed
+    -- body must not obstruct its own LOS raycast.
+    local subject=camera.CameraSubject
+    if subject then
+        local followed=subject:IsA("Model") and subject
+            or subject:FindFirstAncestorWhichIsA("Model")
+        if followed and followed~=target.model then
+            exclusions[#exclusions+1]=followed
+        end
+    end
     local params=RaycastParams.new()
     params.FilterType=Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances=exclusions
@@ -1252,7 +1266,8 @@ local function chooseAimTarget(camera)
                         local d=delta.Magnitude
                         local locked=state.aimSticky and aimSelected
                             and aimSelected.model==model
-                        local allowed=state.aimFovRadius*(locked and 1.10 or 1)
+                        -- Hard FOV boundary applies to sticky targets too.
+                        local allowed=state.aimFovRadius
                         if d<=allowed then
                             aimTargetProbe.insideFov+=1
                             if aimHasLineOfSight(camera,t,point) then
@@ -1338,6 +1353,8 @@ local function runAimbot(dt)
         aimMetrics.targetSwitches+=1
     end
     aimSelected=target
+    aimMetrics.screenErrorPx=delta.Magnitude
+    if state.aimStyle=="Snap" then aimMetrics.snapFrames+=1 end
     -- Prefer relative mouse input on Scriptable cameras when exposed;
     -- fallback to bounded CFrame stabilization when unavailable.
     -- Neither backend proves that weapon aim follows the camera.
@@ -1355,9 +1372,14 @@ local function runAimbot(dt)
         end
         -- Aim moves through the input path so custom camera scripts can
         -- receive relative mouse movement. Sensitivity varies per game.
-        local scale=0.70/math.max(1,state.aimSmoothing)
-        local dx=math.clamp(delta.X*scale,-65,65)
-        local dy=math.clamp(delta.Y*scale,-65,65)
+        -- Snap sends a stronger bounded correction along the game's
+        -- input path; this cannot establish how the weapon is aimed.
+        local snap=state.aimStyle=="Snap"
+        local scale=snap and (0.65*state.aimSnapStrength/100)
+            or (0.70/math.max(1,state.aimSmoothing))
+        local cap=snap and 260 or 65
+        local dx=math.clamp(delta.X*scale,-cap,cap)
+        local dy=math.clamp(delta.Y*scale,-cap,cap)
         local pixelX=dx>=0 and math.floor(dx+0.5) or math.ceil(dx-0.5)
         local pixelY=dy>=0 and math.floor(dy+0.5) or math.ceil(dy-0.5)
         aimMetrics.lastMouseDX=pixelX
@@ -1373,10 +1395,10 @@ local function runAimbot(dt)
             end
             aimMetrics.mouseWrites+=1
         end
-        aimBackend="Mouse relative input (unverified)"
+        aimBackend=state.aimStyle.." relative mouse input (unverified)"
         aimLastActiveStatus=string.format(
-            "Mouse delta (%d,%d) sent; camera/weapon response unverified",
-            pixelX,pixelY)
+            "%s mouse correction (%d,%d), screen error %.0f px; camera/weapon response unverified",
+            state.aimStyle,pixelX,pixelY,aimMetrics.screenErrorPx)
     else
         -- Client camera interpolation: works visually only if the game's
         -- camera controller permits it. It does not guarantee bullet aiming.
@@ -1401,9 +1423,12 @@ local function runAimbot(dt)
                 aimLastRetained=true
             end
         end
-        local alpha=1-math.exp(-dt*30/math.max(1,state.aimSmoothing))
-        local nextCF=before:Lerp(desired,math.clamp(alpha,0,1))
+        local snap=state.aimStyle=="Snap"
+        local alpha=snap and 1
+            or (1-math.exp(-dt*30/math.max(1,state.aimSmoothing)))
+        local nextCF=snap and desired or before:Lerp(desired,math.clamp(alpha,0,1))
         camera.CFrame=nextCF
+        if snap then aimMetrics.cameraSnapWrites+=1 end
         local after=camera.CFrame
         aimLastMoveDegrees=angleBetween(before.LookVector,after.LookVector)
         aimLastWriteDegrees=aimLastMoveDegrees
@@ -1411,7 +1436,8 @@ local function runAimbot(dt)
         if aimLastMoveDegrees>0.01 then aimCameraMoved+=1 end
         aimLastWrittenCamera=after
         aimLastTargetModel=target.model
-        aimBackend=method=="Stabilized" and "Camera stabilization (experimental)" or "Camera"
+        aimBackend=state.aimStyle.." "
+            ..(method=="Stabilized" and "camera stabilization (experimental)" or "camera")
         if method=="Stabilized" then
             -- Observe only the current camera and only while an enemy target is
             -- actively selected. Nothing persists when the UI is opened.
@@ -2466,6 +2492,12 @@ local function getInputDiagnosticsLines()
             aimMetrics.lastMethod,aimMouseMove and "available" or "unavailable",
             aimMetrics.mouseWrites,aimMetrics.mouseErrors,
             aimMetrics.lastMouseDX,aimMetrics.lastMouseDY),
+        string.format("Aim style: %s | visible-only: %s | snap strength: %d%% | FOV gate: %d px",
+            state.aimStyle,tostring(state.aimVisibleOnly),
+            state.aimSnapStrength,state.aimFovRadius),
+        string.format("Snap frames: %d | camera snap writes: %d | last screen error: %.1f px",
+            aimMetrics.snapFrames,aimMetrics.cameraSnapWrites,
+            aimMetrics.screenErrorPx),
         "Target switches: "..aimMetrics.targetSwitches
             .." | sticky targeting: "..tostring(state.aimSticky),
         string.format("Last camera write: %.2f deg | last reset: %.2f deg",
@@ -2597,7 +2629,8 @@ local function report()
         "Fixed limits: 1000 studs / 50 Hz target",
         "Aimbot: "..tostring(state.aimEnabled).." | "..aimStatus,
         "Aim method: "..state.aimMethod.." | backend: "..aimBackend,
-        "Aim FOV: "..state.aimFovRadius.." px | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
+        "Aim FOV: "..state.aimFovRadius.." px | style: "..state.aimStyle
+            .." | smoothing: "..state.aimSmoothing.." | point: "..state.aimPoint,
         "Aim activation: "..(state.aimHoldRmb and "Hold RMB" or "Always when enabled"),
         "Aim visible-only: "..tostring(state.aimVisibleOnly).." | candidates: "..aimSelectionCount,
         "Aim last gameplay gate: "..aimLastGameplayStatus.." ("..aimLastGameplayTime..")",
@@ -2605,7 +2638,8 @@ local function report()
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
         "Relative mouse writes: "..aimMetrics.mouseWrites
             .." | mouse API failures: "..aimMetrics.mouseErrors
-            .." | target switches: "..aimMetrics.targetSwitches,
+            .." | target switches: "..aimMetrics.targetSwitches
+            .." | snap frames: "..aimMetrics.snapFrames,
         Movement.report(),
         "Aim last active: "..aimLastActiveStatus,
         "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
@@ -2696,7 +2730,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.15.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.16.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2854,10 +2888,10 @@ local function launchSpectraUI()
     end
 
     local aimPage=pages.Aimbot
-    header(aimPage,"Aimbot","Smooth aim assist using confirmed enemy targets")
+    header(aimPage,"Aimbot","Snap toward visible enemy targets inside the FOV circle")
     groupLabel(aimPage,"TARGETING")
     toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
-    toggle(aimPage,"Hold right mouse","Aim only while holding right mouse button","aimHoldRmb")
+    toggle(aimPage,"Hold right mouse","Optional: require RMB; off = automatic while enabled","aimHoldRmb")
     toggle(aimPage,"Visibility check","Only aim at unobstructed targets","aimVisibleOnly")
     toggle(aimPage,"Sticky targets","Prefer the previous enemy to reduce rapid target switching","aimSticky")
     local aimPointButton
@@ -2873,7 +2907,14 @@ local function launchSpectraUI()
     end)
     groupLabel(aimPage,"CONTROL")
     settingSlider(aimPage,"FOV radius","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
-    settingSlider(aimPage,"Smoothing","1 = faster, 20 = more gradual","aimSmoothing",1,20,1,"")
+    local aimStyleButton
+    aimStyleButton=action(aimPage,"Aim style: Snap",function()
+        state.aimStyle=state.aimStyle=="Snap" and "Smooth" or "Snap"
+        aimStyleButton.Text="Aim style: "..state.aimStyle
+        log("INFO","Aimbot style: "..state.aimStyle)
+    end)
+    settingSlider(aimPage,"Snap strength","Fast mouse correction; tune to in-game sensitivity","aimSnapStrength",40,200,10,"%")
+    settingSlider(aimPage,"Smoothing","Only affects Smooth mode (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
     toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
     local aimMethodButton
     aimMethodButton=action(aimPage,"Aim method: Auto",function()
@@ -2886,7 +2927,7 @@ local function launchSpectraUI()
         aimMethodButton.Text="Aim method: "..state.aimMethod
         log("INFO","Aimbot method: "..state.aimMethod)
     end)
-    row(aimPage,"Runtime compatibility","Auto uses relative input on Scriptable cameras when exposed; otherwise camera fallback. Weapon direction unverified.")
+    row(aimPage,"Runtime compatibility","Snap uses fast relative mouse input on Scriptable cameras or instant camera correction otherwise; weapon/reticle response unverified.")
     groupLabel(aimPage,"AIMBOT DIAGNOSTICS")
     action(aimPage,"Print Aimbot diagnostics to Roblox logs",function()
         local camera=Workspace.CurrentCamera
@@ -2909,6 +2950,8 @@ local function launchSpectraUI()
                 or entry:find("CameraType:",1,true)
                 or entry:find("Hold-RMB",1,true)
                 or entry:find("Target switches",1,true)
+                or entry:find("Aim style:",1,true)
+                or entry:find("Snap frames:",1,true)
                 or entry:find("Camera stabilization",1,true) then
                 print("[SPECTRA AIM] "..entry)
             end
@@ -3309,7 +3352,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.15.0 loaded. Removed unused modifiers; focus on Aimbot")
+    log("INFO","SPECTRA Phase 1 v1.16.0 loaded. Snap style, strict visible-only FOV targeting and fast mouse/camera aiming")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
