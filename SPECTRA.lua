@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.9.1
+    SPECTRA / PHASE 1                         v1.9.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.9.1"
+local VERSION = "1.9.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -2146,591 +2146,597 @@ local function shutdown()
 end
 ENV.SPECTRA_PHASE1_UNLOAD = shutdown
 
--- UI foundation --------------------------------------------------------------
-overlayGui=create("ScreenGui",{Name="SPECTRA_Phase1_Overlay",IgnoreGuiInset=true,ResetOnSpawn=false,DisplayOrder=160,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
-menuGui=create("ScreenGui",{Name="SPECTRA_Phase1_UI",IgnoreGuiInset=true,ResetOnSpawn=false,DisplayOrder=161,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
-if not safeParent(overlayGui) or not safeParent(menuGui) then
-    warn("[SPECTRA] Could not parent GUI to an accessible UI container")
-    shutdown()
-    return
-end
-overlayLayer=create("Frame",{Name="WorldMarkers",BackgroundTransparency=1,Size=UDim2.fromScale(1,1),Position=UDim2.fromScale(0,0),ClipsDescendants=true},overlayGui)
-aimFovFrame=create("Frame",{
-    Name="AimFOV",BackgroundTransparency=1,Visible=false,
-    BorderSizePixel=0,Size=UDim2.fromOffset(300,300),ZIndex=5
-},overlayLayer)
-create("UICorner",{CornerRadius=UDim.new(1,0)},aimFovFrame)
-create("UIStroke",{Color=C.accent,Transparency=0.25,Thickness=1},aimFovFrame)
-window=create("Frame",{
-    Name="MainWindow",Size=UDim2.fromOffset(660,445),Position=UDim2.new(0.5,-330,0.5,-223),
-    BackgroundColor3=C.base,BorderSizePixel=0,ClipsDescendants=true
-},menuGui)
-round(window,9); outline(window)
-menu=window
-local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
-local title=textLabel(top,"SPECTRA",16,C.white,true)
-title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-local sub=textLabel(top,"PLAYER VISUALS  /  1.9.1",10,C.muted)
-sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
--- Hide only changes menu visibility; ESP keeps running.
-local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
-    BackgroundColor3=C.panel,Size=UDim2.fromOffset(56,26),Position=UDim2.new(1,-166,0,13),BorderSizePixel=0},top)
-round(hideButton,5)
-connect(hideButton.MouseButton1Click,function()
-    window.Visible=false
-end)
--- Unload removes the entire overlay and all SPECTRA event connections.
-local unloadButton=create("TextButton",{Text="Unload",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.white,
-    BackgroundColor3=C.panel2,Size=UDim2.fromOffset(88,26),Position=UDim2.new(1,-103,0,13),BorderSizePixel=0},top)
-round(unloadButton,5)
-connect(unloadButton.MouseButton1Click,shutdown)
-create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1),Position=UDim2.fromOffset(0,53)},window)
-local left=create("Frame",{Position=UDim2.fromOffset(0,54),Size=UDim2.new(0,145,1,-54),BackgroundColor3=C.sidebar,BorderSizePixel=0},window)
-create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(0,1,1,0),Position=UDim2.new(1,-1,0,0)},left)
-local content=create("Frame",{Position=UDim2.fromOffset(145,54),Size=UDim2.new(1,-145,1,-54),BackgroundTransparency=1,BorderSizePixel=0},window)
-local footer=create("Frame",{BackgroundColor3=C.base,BorderSizePixel=0,Position=UDim2.new(0,145,1,-32),Size=UDim2.new(1,-145,0,32)},window)
-create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1)},footer)
-statusText=textLabel(footer,"Initializing...",10,C.muted)
-statusText.Position=UDim2.fromOffset(17,4);statusText.Size=UDim2.new(1,-34,1,-8)
-local pages={}
-local tabButtons={}
-for index,name in ipairs({"Aimbot","ESP","Modifiers","Settings","Debug"}) do
-    local b=create("TextButton",{
-        Text=name,TextSize=12,Font=Enum.Font.GothamMedium,
-        TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,
-        BackgroundColor3=C.sidebar,Size=UDim2.fromOffset(123,35),Position=UDim2.fromOffset(11,18+(index-1)*42),BorderSizePixel=0
-    },left)
-    create("UIPadding",{PaddingLeft=UDim.new(0,11)},b)
-    round(b,5)
-    tabButtons[name]=b
-    pages[name]=create("ScrollingFrame",{
-        Name=name.."Page",Position=UDim2.fromOffset(0,0),Size=UDim2.new(1,0,1,-32),
-        BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.border,
-        CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
-        ScrollingDirection=Enum.ScrollingDirection.Y,Visible=false
-    },content)
-    create("UIPadding",{PaddingTop=UDim.new(0,18),PaddingLeft=UDim.new(0,18),PaddingRight=UDim.new(0,22),PaddingBottom=UDim.new(0,18)},pages[name])
-    create("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,8)},pages[name])
-end
-local function selectTab(name)
-    focusedTab=name
-    for key,page in pairs(pages) do
-        local selected=key==name
-        page.Visible=selected
-        tabButtons[key].BackgroundColor3=selected and C.panel2 or C.sidebar
-        tabButtons[key].TextColor3=selected and C.accent or C.muted
+-- UI startup is a separate function scope to avoid exhausting the
+-- main script's Luau local-variable slots. UI setup still executes now.
+local function launchSpectraUI()
+    -- UI foundation --------------------------------------------------------------
+    overlayGui=create("ScreenGui",{Name="SPECTRA_Phase1_Overlay",IgnoreGuiInset=true,ResetOnSpawn=false,DisplayOrder=160,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
+    menuGui=create("ScreenGui",{Name="SPECTRA_Phase1_UI",IgnoreGuiInset=true,ResetOnSpawn=false,DisplayOrder=161,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
+    if not safeParent(overlayGui) or not safeParent(menuGui) then
+        warn("[SPECTRA] Could not parent GUI to an accessible UI container")
+        shutdown()
+        return
     end
-end
-for name,b in pairs(tabButtons) do connect(b.MouseButton1Click,function() selectTab(name) end) end
-local function header(page,name,description)
-    local f=create("Frame",{Size=UDim2.new(1,-3,0,53),BackgroundTransparency=1,BorderSizePixel=0},page)
-    local h=textLabel(f,name,16,C.white,true);h.Size=UDim2.new(1,0,0,23)
-    local d=textLabel(f,description,10,C.muted);d.Position=UDim2.fromOffset(0,24);d.Size=UDim2.new(1,0,0,17)
-end
-local function groupLabel(page,text)
-    local f=create("Frame",{Size=UDim2.new(1,-3,0,22),BackgroundTransparency=1},page)
-    local t=textLabel(f,text,10,C.muted,true)
-    t.Size=UDim2.new(1,0,1,0)
-end
-local function row(page,name,description)
-    local f=create("Frame",{Size=UDim2.new(1,-3,0,51),BackgroundColor3=C.panel,BorderSizePixel=0},page)
-    round(f,6)
-    local t=textLabel(f,name,12,C.white,true);t.Position=UDim2.fromOffset(13,6);t.Size=UDim2.new(1,-105,0,19)
-    local d=textLabel(f,description,10,C.muted);d.Position=UDim2.fromOffset(13,25);d.Size=UDim2.new(1,-100,0,17)
-    return f
-end
-local function toggle(page,label,help,key)
-    local f=row(page,label,help)
-    local track=create("TextButton",{Text="",BackgroundColor3=C.border,BorderSizePixel=0,
-        Size=UDim2.fromOffset(38,20),Position=UDim2.new(1,-52,0,15)},f)
-    round(track,10)
-    local knob=create("Frame",{Size=UDim2.fromOffset(14,14),Position=UDim2.fromOffset(3,3),BackgroundColor3=C.white,BorderSizePixel=0},track)
-    round(knob,8)
-    local function refresh()
-        track.BackgroundColor3=state[key] and C.accent or C.border
-        knob.Position=state[key] and UDim2.fromOffset(21,3) or UDim2.fromOffset(3,3)
-    end
-    connect(track.MouseButton1Click,function()
-        state[key]=not state[key]
-        refresh()
-        if key=="enabled" and not state[key] then
-            for _,w in pairs(widgets) do hideWidget(w) end
-        elseif key=="enabled" and state[key] then
-            scanAccumulator=10
-        end
-        log("INFO",label.." = "..tostring(state[key]))
+    overlayLayer=create("Frame",{Name="WorldMarkers",BackgroundTransparency=1,Size=UDim2.fromScale(1,1),Position=UDim2.fromScale(0,0),ClipsDescendants=true},overlayGui)
+    aimFovFrame=create("Frame",{
+        Name="AimFOV",BackgroundTransparency=1,Visible=false,
+        BorderSizePixel=0,Size=UDim2.fromOffset(300,300),ZIndex=5
+    },overlayLayer)
+    create("UICorner",{CornerRadius=UDim.new(1,0)},aimFovFrame)
+    create("UIStroke",{Color=C.accent,Transparency=0.25,Thickness=1},aimFovFrame)
+    window=create("Frame",{
+        Name="MainWindow",Size=UDim2.fromOffset(660,445),Position=UDim2.new(0.5,-330,0.5,-223),
+        BackgroundColor3=C.base,BorderSizePixel=0,ClipsDescendants=true
+    },menuGui)
+    round(window,9); outline(window)
+    menu=window
+    local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
+    local title=textLabel(top,"SPECTRA",16,C.white,true)
+    title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.9.2",10,C.muted)
+    sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
+    -- Hide only changes menu visibility; ESP keeps running.
+    local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
+        BackgroundColor3=C.panel,Size=UDim2.fromOffset(56,26),Position=UDim2.new(1,-166,0,13),BorderSizePixel=0},top)
+    round(hideButton,5)
+    connect(hideButton.MouseButton1Click,function()
+        window.Visible=false
     end)
-    toggleRefreshers[#toggleRefreshers+1] = refresh
-    refresh()
-end
-local function action(page,label,callback)
-    local b=create("TextButton",{Text=label,Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=C.white,
-        BackgroundColor3=C.panel2,BorderSizePixel=0,Size=UDim2.new(1,-3,0,34)},page)
-    round(b,5)
-    connect(b.MouseButton1Click,function() safeCall(label,callback) end)
-    return b
-end
-
-local function settingSlider(page,name,description,key,minimum,maximum,step,unit)
-    local f=create("Frame",{Size=UDim2.new(1,-3,0,77),BackgroundColor3=C.panel,BorderSizePixel=0},page)
-    round(f,6)
-    local caption=textLabel(f,name,12,C.white,true)
-    caption.Position=UDim2.fromOffset(13,6)
-    caption.Size=UDim2.new(1,-115,0,19)
-    local hint=textLabel(f,description,10,C.muted)
-    hint.Position=UDim2.fromOffset(13,26)
-    hint.Size=UDim2.new(1,-26,0,15)
-    local valueText=textLabel(f,"",11,C.accent,true)
-    valueText.Position=UDim2.new(1,-99,0,7)
-    valueText.Size=UDim2.fromOffset(85,18)
-    valueText.TextXAlignment=Enum.TextXAlignment.Right
-    local rail=create("Frame",{
-        Position=UDim2.new(0,14,1,-20),Size=UDim2.new(1,-28,0,5),
-        BackgroundColor3=C.border,BorderSizePixel=0
-    },f)
-    round(rail,3)
-    local fill=create("Frame",{Size=UDim2.fromScale(0,1),BackgroundColor3=C.accent,BorderSizePixel=0},rail)
-    round(fill,3)
-    local hitbox=create("TextButton",{
-        Text="",BackgroundTransparency=1,Position=UDim2.new(0,8,1,-30),
-        Size=UDim2.new(1,-16,0,27),BorderSizePixel=0
-    },f)
-    local active=false
-    local function refresh()
-        local value=state[key]
-        local percent=math.clamp((value-minimum)/(maximum-minimum),0,1)
-        fill.Size=UDim2.fromScale(percent,1)
-        valueText.Text=tostring(value)..(unit or "")
+    -- Unload removes the entire overlay and all SPECTRA event connections.
+    local unloadButton=create("TextButton",{Text="Unload",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.white,
+        BackgroundColor3=C.panel2,Size=UDim2.fromOffset(88,26),Position=UDim2.new(1,-103,0,13),BorderSizePixel=0},top)
+    round(unloadButton,5)
+    connect(unloadButton.MouseButton1Click,shutdown)
+    create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1),Position=UDim2.fromOffset(0,53)},window)
+    local left=create("Frame",{Position=UDim2.fromOffset(0,54),Size=UDim2.new(0,145,1,-54),BackgroundColor3=C.sidebar,BorderSizePixel=0},window)
+    create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(0,1,1,0),Position=UDim2.new(1,-1,0,0)},left)
+    local content=create("Frame",{Position=UDim2.fromOffset(145,54),Size=UDim2.new(1,-145,1,-54),BackgroundTransparency=1,BorderSizePixel=0},window)
+    local footer=create("Frame",{BackgroundColor3=C.base,BorderSizePixel=0,Position=UDim2.new(0,145,1,-32),Size=UDim2.new(1,-145,0,32)},window)
+    create("Frame",{BackgroundColor3=C.border,BorderSizePixel=0,Size=UDim2.new(1,0,0,1)},footer)
+    statusText=textLabel(footer,"Initializing...",10,C.muted)
+    statusText.Position=UDim2.fromOffset(17,4);statusText.Size=UDim2.new(1,-34,1,-8)
+    local pages={}
+    local tabButtons={}
+    for index,name in ipairs({"Aimbot","ESP","Modifiers","Settings","Debug"}) do
+        local b=create("TextButton",{
+            Text=name,TextSize=12,Font=Enum.Font.GothamMedium,
+            TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,
+            BackgroundColor3=C.sidebar,Size=UDim2.fromOffset(123,35),Position=UDim2.fromOffset(11,18+(index-1)*42),BorderSizePixel=0
+        },left)
+        create("UIPadding",{PaddingLeft=UDim.new(0,11)},b)
+        round(b,5)
+        tabButtons[name]=b
+        pages[name]=create("ScrollingFrame",{
+            Name=name.."Page",Position=UDim2.fromOffset(0,0),Size=UDim2.new(1,0,1,-32),
+            BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.border,
+            CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+            ScrollingDirection=Enum.ScrollingDirection.Y,Visible=false
+        },content)
+        create("UIPadding",{PaddingTop=UDim.new(0,18),PaddingLeft=UDim.new(0,18),PaddingRight=UDim.new(0,22),PaddingBottom=UDim.new(0,18)},pages[name])
+        create("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,8)},pages[name])
     end
-    local function adjust(x)
-        local left=rail.AbsolutePosition.X
-        local width=math.max(1,rail.AbsoluteSize.X)
-        local fraction=math.clamp((x-left)/width,0,1)
-        local value=minimum+math.floor((maximum-minimum)*fraction/step+0.5)*step
-        state[key]=math.clamp(value,minimum,maximum)
+    local function selectTab(name)
+        focusedTab=name
+        for key,page in pairs(pages) do
+            local selected=key==name
+            page.Visible=selected
+            tabButtons[key].BackgroundColor3=selected and C.panel2 or C.sidebar
+            tabButtons[key].TextColor3=selected and C.accent or C.muted
+        end
+    end
+    for name,b in pairs(tabButtons) do connect(b.MouseButton1Click,function() selectTab(name) end) end
+    local function header(page,name,description)
+        local f=create("Frame",{Size=UDim2.new(1,-3,0,53),BackgroundTransparency=1,BorderSizePixel=0},page)
+        local h=textLabel(f,name,16,C.white,true);h.Size=UDim2.new(1,0,0,23)
+        local d=textLabel(f,description,10,C.muted);d.Position=UDim2.fromOffset(0,24);d.Size=UDim2.new(1,0,0,17)
+    end
+    local function groupLabel(page,text)
+        local f=create("Frame",{Size=UDim2.new(1,-3,0,22),BackgroundTransparency=1},page)
+        local t=textLabel(f,text,10,C.muted,true)
+        t.Size=UDim2.new(1,0,1,0)
+    end
+    local function row(page,name,description)
+        local f=create("Frame",{Size=UDim2.new(1,-3,0,51),BackgroundColor3=C.panel,BorderSizePixel=0},page)
+        round(f,6)
+        local t=textLabel(f,name,12,C.white,true);t.Position=UDim2.fromOffset(13,6);t.Size=UDim2.new(1,-105,0,19)
+        local d=textLabel(f,description,10,C.muted);d.Position=UDim2.fromOffset(13,25);d.Size=UDim2.new(1,-100,0,17)
+        return f
+    end
+    local function toggle(page,label,help,key)
+        local f=row(page,label,help)
+        local track=create("TextButton",{Text="",BackgroundColor3=C.border,BorderSizePixel=0,
+            Size=UDim2.fromOffset(38,20),Position=UDim2.new(1,-52,0,15)},f)
+        round(track,10)
+        local knob=create("Frame",{Size=UDim2.fromOffset(14,14),Position=UDim2.fromOffset(3,3),BackgroundColor3=C.white,BorderSizePixel=0},track)
+        round(knob,8)
+        local function refresh()
+            track.BackgroundColor3=state[key] and C.accent or C.border
+            knob.Position=state[key] and UDim2.fromOffset(21,3) or UDim2.fromOffset(3,3)
+        end
+        connect(track.MouseButton1Click,function()
+            state[key]=not state[key]
+            refresh()
+            if key=="enabled" and not state[key] then
+                for _,w in pairs(widgets) do hideWidget(w) end
+            elseif key=="enabled" and state[key] then
+                scanAccumulator=10
+            end
+            log("INFO",label.." = "..tostring(state[key]))
+        end)
+        toggleRefreshers[#toggleRefreshers+1] = refresh
         refresh()
     end
-    connect(hitbox.InputBegan,function(input)
+    local function action(page,label,callback)
+        local b=create("TextButton",{Text=label,Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=C.white,
+            BackgroundColor3=C.panel2,BorderSizePixel=0,Size=UDim2.new(1,-3,0,34)},page)
+        round(b,5)
+        connect(b.MouseButton1Click,function() safeCall(label,callback) end)
+        return b
+    end
+
+    local function settingSlider(page,name,description,key,minimum,maximum,step,unit)
+        local f=create("Frame",{Size=UDim2.new(1,-3,0,77),BackgroundColor3=C.panel,BorderSizePixel=0},page)
+        round(f,6)
+        local caption=textLabel(f,name,12,C.white,true)
+        caption.Position=UDim2.fromOffset(13,6)
+        caption.Size=UDim2.new(1,-115,0,19)
+        local hint=textLabel(f,description,10,C.muted)
+        hint.Position=UDim2.fromOffset(13,26)
+        hint.Size=UDim2.new(1,-26,0,15)
+        local valueText=textLabel(f,"",11,C.accent,true)
+        valueText.Position=UDim2.new(1,-99,0,7)
+        valueText.Size=UDim2.fromOffset(85,18)
+        valueText.TextXAlignment=Enum.TextXAlignment.Right
+        local rail=create("Frame",{
+            Position=UDim2.new(0,14,1,-20),Size=UDim2.new(1,-28,0,5),
+            BackgroundColor3=C.border,BorderSizePixel=0
+        },f)
+        round(rail,3)
+        local fill=create("Frame",{Size=UDim2.fromScale(0,1),BackgroundColor3=C.accent,BorderSizePixel=0},rail)
+        round(fill,3)
+        local hitbox=create("TextButton",{
+            Text="",BackgroundTransparency=1,Position=UDim2.new(0,8,1,-30),
+            Size=UDim2.new(1,-16,0,27),BorderSizePixel=0
+        },f)
+        local active=false
+        local function refresh()
+            local value=state[key]
+            local percent=math.clamp((value-minimum)/(maximum-minimum),0,1)
+            fill.Size=UDim2.fromScale(percent,1)
+            valueText.Text=tostring(value)..(unit or "")
+        end
+        local function adjust(x)
+            local left=rail.AbsolutePosition.X
+            local width=math.max(1,rail.AbsoluteSize.X)
+            local fraction=math.clamp((x-left)/width,0,1)
+            local value=minimum+math.floor((maximum-minimum)*fraction/step+0.5)*step
+            state[key]=math.clamp(value,minimum,maximum)
+            refresh()
+        end
+        connect(hitbox.InputBegan,function(input)
+            if input.UserInputType==Enum.UserInputType.MouseButton1 then
+                active=true
+                adjust(input.Position.X)
+            end
+        end)
+        connect(UserInputService.InputChanged,function(input)
+            if active and input.UserInputType==Enum.UserInputType.MouseMovement then
+                adjust(input.Position.X)
+            end
+        end)
+        connect(UserInputService.InputEnded,function(input)
+            if input.UserInputType==Enum.UserInputType.MouseButton1 then active=false end
+        end)
+        refresh()
+    end
+
+    local aimPage=pages.Aimbot
+    header(aimPage,"Aimbot","Smooth aim assist using confirmed enemy targets")
+    groupLabel(aimPage,"TARGETING")
+    toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
+    toggle(aimPage,"Hold right mouse","Aim only while holding right mouse button","aimHoldRmb")
+    toggle(aimPage,"Visibility check","Only aim at unobstructed targets","aimVisibleOnly")
+    local aimPointButton
+    aimPointButton=action(aimPage,"Aim point: Head",function()
+        local order={"Head","Chest","Center"}
+        local nextIndex=1
+        for i,value in ipairs(order) do
+            if state.aimPoint==value then nextIndex=i%#order+1; break end
+        end
+        state.aimPoint=order[nextIndex]
+        aimPointButton.Text="Aim point: "..state.aimPoint
+        log("INFO","Aimbot aim point: "..state.aimPoint)
+    end)
+    groupLabel(aimPage,"CONTROL")
+    settingSlider(aimPage,"FOV radius","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
+    settingSlider(aimPage,"Smoothing","1 = faster, 20 = more gradual","aimSmoothing",1,20,1,"")
+    toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
+    local aimMethodButton
+    aimMethodButton=action(aimPage,"Aim method: Auto",function()
+        local modes={"Auto","Mouse","Camera","Stabilized"}
+        local nextIndex=1
+        for i,value in ipairs(modes) do
+            if state.aimMethod==value then nextIndex=i%#modes+1; break end
+        end
+        state.aimMethod=modes[nextIndex]
+        aimMethodButton.Text="Aim method: "..state.aimMethod
+        log("INFO","Aimbot method: "..state.aimMethod)
+    end)
+    row(aimPage,"Runtime compatibility","Auto stabilizes Scriptable camera. Visual correction only; weapon unverified")
+    groupLabel(aimPage,"STATUS")
+    local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
+    aimStatusText.Size=UDim2.new(1,-3,0,24)
+
+    local modifiersPage=pages.Modifiers
+    header(modifiersPage,"Modifiers","Local visual gameplay adjustments")
+    groupLabel(modifiersPage,"RECOIL")
+    toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
+    settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
+    row(modifiersPage,"Limitations","Camera-only adjustment; actual weapon recoil and spread unchanged")
+    groupLabel(modifiersPage,"STATUS")
+    local recoilStatusText=textLabel(modifiersPage,"Off",11,C.muted)
+    recoilStatusText.Size=UDim2.new(1,-3,0,42)
+    recoilStatusText.TextWrapped=true
+    groupLabel(modifiersPage,"NOTES")
+    local recoilNote=textLabel(modifiersPage,"Tests require holding fire with the menu hidden. If the game controls recoil separately from Camera.CFrame, no recoil reduction may be visible.",11,C.muted)
+    recoilNote.Size=UDim2.new(1,-3,0,52)
+    recoilNote.TextWrapped=true
+
+    groupLabel(modifiersPage,"MOVEMENT")
+    toggle(modifiersPage,"Speed Hack","Local speed changes; server can reset movement","speedHack")
+    settingSlider(modifiersPage,"Speed","Movement speed in studs per second","speedValue",16,120,4,"")
+    toggle(modifiersPage,"Fly","WASD movement, Space up, Ctrl down","fly")
+    settingSlider(modifiersPage,"Fly speed","Target flight speed","flySpeed",15,120,5,"")
+    toggle(modifiersPage,"Noclip","Turns off collisions on your verified character","noclip")
+    toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
+    toggle(modifiersPage,"High Jump","Increases local jump impulse","highJump")
+    settingSlider(modifiersPage,"Jump power","Impulse for High Jump","jumpPower",48,160,4,"")
+    toggle(modifiersPage,"Bunny Hop","Automatically jumps when moving on ground","bunnyHop")
+    toggle(modifiersPage,"No Fall Damage","Attempts to slow descent before landing","noFallDamage")
+    groupLabel(modifiersPage,"POSITION")
+    row(modifiersPage,"Teleport","Bookmark and move only your verified local character")
+    action(modifiersPage,"Save position",Movement.save)
+    action(modifiersPage,"Teleport to saved position",Movement.saved)
+    action(modifiersPage,"Teleport forward (max 30 studs)",Movement.forward)
+    groupLabel(modifiersPage,"ORIENTATION")
+    toggle(modifiersPage,"Spinbot","Rotates local character; may disturb movement","spinbot")
+    settingSlider(modifiersPage,"Spin rate","Degrees per second","spinRate",60,720,30," deg/s")
+    toggle(modifiersPage,"Anti Aim (local visual)","Jitters local model; does NOT alter server hitbox","antiAim")
+    groupLabel(modifiersPage,"MOVEMENT STATUS")
+    Movement.statusLabel=textLabel(modifiersPage,"Waiting for verified local character",11,C.muted)
+    Movement.statusLabel.Size=UDim2.new(1,-3,0,57)
+    Movement.statusLabel.TextWrapped=true
+    row(modifiersPage,"Server limitations","Server can reject speed, flight, teleport, damage changes")
+    local espPage=pages.ESP
+    header(espPage,"Player visuals","Configure your in-game overlay")
+    groupLabel(espPage,"DISPLAY")
+    toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
+    toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
+    toggle(espPage,"Tracers","Lines from the screen bottom toward players","tracers")
+    toggle(espPage,"Skeleton","Real joints if available; posture-aware estimate otherwise","skeleton")
+    toggle(espPage,"3D highlight","Client-side character highlighting","highlights")
+
+    -- Keep the menu fully inside the viewport, including after user dragging,
+    -- display resolution changes, and inconsistent custom GUI parent sizes.
+    local function clampWindow(center)
+        if not alive or not window or not window.Parent then return end
+        local camera = Workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.new(1280,720)
+        local margin = 12
+        local width = math.floor(math.min(660, math.max(300,viewport.X - margin*2)))
+        local height = math.floor(math.min(445, math.max(265,viewport.Y - margin*2)))
+        window.Size = UDim2.fromOffset(width,height)
+        local x = window.Position.X.Scale*viewport.X + window.Position.X.Offset
+        local y = window.Position.Y.Scale*viewport.Y + window.Position.Y.Offset
+        if center then
+            x = (viewport.X-width)/2
+            y = (viewport.Y-height)/2
+        end
+        x = math.clamp(x, margin, math.max(margin, viewport.X-width-margin))
+        y = math.clamp(y, margin, math.max(margin, viewport.Y-height-margin))
+        window.Position = UDim2.fromOffset(math.floor(x+0.5),math.floor(y+0.5))
+    end
+
+    local settingsPage=pages.Settings
+    header(settingsPage,"Settings","Interface preferences and runtime controls")
+    groupLabel(settingsPage,"APPEARANCE")
+    local colorButton
+    colorButton=action(settingsPage,"Marker color: Cyan  (click to cycle)",function()
+        local order={"Cyan","Coral","Lime","White"}
+        local n=1
+        for i,v in ipairs(order) do
+            if v==state.color then n=i%#order+1; break end
+        end
+        state.color=order[n]
+        colorButton.Text="Marker color: "..state.color.."  (click to cycle)"
+        log("INFO","Marker color: "..state.color)
+    end)
+    groupLabel(settingsPage,"KEYBINDS")
+    local keyText=row(settingsPage,"Right Shift","Show or hide the menu")
+    local debugText=row(settingsPage,"F8","Open the diagnostic console")
+    local homeText=row(settingsPage,"Home","Recenter the menu if it moves off-screen")
+    row(settingsPage,"Ctrl + End","Unload SPECTRA without leaving the game")
+    groupLabel(settingsPage,"CONTROL")
+    action(settingsPage,"Center menu on screen",function() clampWindow(true); log("INFO","Menu recentered") end)
+    action(settingsPage,"Rescan replicated models",function() discoverTargets();log("INFO","Manual scan: "..lastScanDetails) end)
+    action(settingsPage,"Disable ESP markers",function() state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end; log("INFO","ESP disabled") end)
+    action(settingsPage,"Unload SPECTRA completely",shutdown)
+    groupLabel(settingsPage,"DESIGN NOTES")
+    local note=create("TextLabel",{Text="UI and markers are created on the local client. This build never writes to weapon state, other player characters, or Phantom Forces replication interfaces.",
+        Size=UDim2.new(1,-10,0,64),TextWrapped=true,BackgroundTransparency=1,Font=Enum.Font.Gotham,TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextSize=11},settingsPage)
+
+    local debugPage=pages.Debug
+    header(debugPage,"Diagnostics","Read-only inspection  ·  Logs limited to 140 entries")
+    debugSummary=textLabel(debugPage,"Not scanned",11,C.muted)
+    debugSummary.Size=UDim2.new(1,-3,0,39)
+    debugSummary.TextWrapped=true
+    debugSummary.TextYAlignment=Enum.TextYAlignment.Top
+    local buttons=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
+    local function debugButton(text,x,callback)
+        local b=create("TextButton",{Text=text,TextSize=11,Font=Enum.Font.GothamMedium,
+            TextColor3=C.white,BackgroundColor3=C.panel2,BorderSizePixel=0,
+            Position=UDim2.new(x,0,0,0),Size=UDim2.new(0.32,-3,1,0)},buttons)
+        round(b,5);connect(b.MouseButton1Click,callback)
+    end
+    debugButton("Run probe",0,function() discoverTargets();log("INFO","Probe: "..lastSource.." / "..lastScanDetails) end)
+    debugButton("Copy report",0.335,exportReport)
+    debugButton("Clear logs",0.67,function() table.clear(logs);if logBox then logBox.Text="" end end)
+    groupLabel(debugPage,"CAMERA & INPUT DIAGNOSTICS")
+    local inputDiagPanel=create("Frame",{
+        Size=UDim2.new(1,-3,0,255),BackgroundColor3=C.panel,BorderSizePixel=0
+    },debugPage)
+    round(inputDiagPanel,6)
+    inputDiagLiveText=create("TextLabel",{
+        Position=UDim2.fromOffset(10,8),Size=UDim2.new(1,-20,1,-16),
+        BackgroundTransparency=1,Text="Collecting read-only input and camera samples...",
+        TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,
+        TextXAlignment=Enum.TextXAlignment.Left,TextSize=10,Font=Enum.Font.Code,
+        TextColor3=C.white,BorderSizePixel=0
+    },inputDiagPanel)
+    local diagActions=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
+    local function diagAction(title,x,callback)
+        local b=create("TextButton",{
+            Text=title,TextSize=11,Font=Enum.Font.GothamMedium,
+            TextColor3=C.white,BackgroundColor3=C.panel2,BorderSizePixel=0,
+            Position=UDim2.new(x,0,0,0),Size=UDim2.new(0.48,-2,1,0)
+        },diagActions)
+        round(b,5)
+        connect(b.MouseButton1Click,function() safeCall(title,callback) end)
+    end
+    diagAction("Copy input diagnostics",0,copyInputDiagnostics)
+    diagAction("Reset input counters",0.52,function()
+        resetInputDiagnostics()
+        log("INFO","Camera & input counters reset")
+    end)
+    groupLabel(debugPage,"EVENT LOG")
+    local logPanel=create("Frame",{Size=UDim2.new(1,-3,0,210),BackgroundColor3=C.panel,BorderSizePixel=0},debugPage)
+    round(logPanel,6)
+    local logScroll=create("ScrollingFrame",{Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-16,1,-16),BackgroundTransparency=1,
+        BorderSizePixel=0,ScrollBarThickness=3,CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},logPanel)
+    logBox=create("TextBox",{BackgroundTransparency=1,ClearTextOnFocus=false,MultiLine=true,TextEditable=false,
+        Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+        TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
+    local inputRow=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
+    local cmd=create("TextBox",{PlaceholderText="status, inputdiag, probe, aimstatus, help, unload",Text="",ClearTextOnFocus=false,
+        TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,
+        PlaceholderColor3=C.muted,BackgroundColor3=C.panel,Size=UDim2.new(1,-76,1,0),BorderSizePixel=0},inputRow)
+    round(cmd,5);create("UIPadding",{PaddingLeft=UDim.new(0,9)},cmd)
+    local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.white,
+        BackgroundColor3=C.panel2,Size=UDim2.fromOffset(68,32),Position=UDim2.new(1,-68,0,0),BorderSizePixel=0},inputRow)
+    round(run,5)
+    local function runCommand(raw)
+        local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
+        if input=="help" then log("INFO","Commands: help, status, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+        elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
+            log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
+        elseif input=="inputdiag" then
+            for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
+        elseif input=="copyinput" then copyInputDiagnostics()
+        elseif input=="resetinput" then resetInputDiagnostics();log("INFO","Camera & input counters reset")
+        elseif input=="modstatus" then
+            for entry in Movement.report():gmatch("[^\n]+") do log("INFO",entry) end
+        elseif input=="modprobe" then
+            local model,root,h=Movement.find(true)
+            log("INFO","Local: "..Movement.data.status.." | model="..tostring(model and model.Name or "nil")
+                .." | root="..tostring(root and root.Name or "nil").." | humanoid="..tostring(h~=nil))
+        elseif input=="savepos" then Movement.save()
+        elseif input=="tpback" then Movement.saved()
+        elseif input=="tpforward" then Movement.forward()
+        elseif input:match("^tp%s+") then
+            local x,y,z=input:match("^tp%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)$")
+            x,y,z=tonumber(x),tonumber(y),tonumber(z)
+            if x and y and z and math.abs(x)<100000 and math.abs(y)<100000 and math.abs(z)<100000 then
+                local model=Movement.find(true)
+                if model then
+                    Movement.teleport(CFrame.new(x,y,z)*model:GetPivot().Rotation)
+                else log("WARN",Movement.data.status) end
+            else log("WARN","Use tp x y z with finite numeric coordinates") end
+        elseif input=="recoilstatus" then
+            for entry in getRecoilReport():gmatch("[^\n]+") do log("INFO",entry) end
+        elseif input=="norecoil on" then state.noRecoil=true;refreshAllToggles();log("INFO","Experimental camera recoil compensation enabled")
+        elseif input=="norecoil off" then state.noRecoil=false;refreshAllToggles();log("INFO","Camera recoil compensation disabled")
+        elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
+        elseif input=="sources" then
+            local sourceLines=inspectDataSources()
+            for _, entry in ipairs(sourceLines) do log("INFO",entry) end
+        elseif input=="team" then
+            log("INFO","Calibration: "..calibrationMessage.." | events="..groupEvents)
+        elseif input=="calibrate" then calibrateEnemyFromCrosshair()
+        elseif input=="pick" then beginPicker()
+        elseif input=="clearteam" then clearCalibration();discoverTargets();log("INFO","Calibration cleared")
+        elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
+        elseif input=="targets" then
+            log("INFO","Candidates: "..#targets.."  verified="..stats.matched.." unverified="..stats.anonymous)
+            for i=1,math.min(12,#targets) do
+                local t=targets[i]
+                log("INFO",string.format("%d) %s [%s, %s]",i,t.player and t.player.Name or "calibrated enemy rig",t.source,t.player and "verified" or "group-only"))
+            end
+        elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
+        elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
+        elseif input=="aimstatus" then
+            log("INFO","Aim: "..aimStatus.." | gameplay="..aimLastGameplayStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrides="..aimOverrideSamples.." | corrections="..aimCorrectionCount)
+            log("INFO",getAimGateDiagnostics().." | holdRMB="..tostring(state.aimHoldRmb))
+        elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
+        elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
+        elseif input=="clear" then table.clear(logs);logBox.Text=""
+        elseif input=="unload" then shutdown()
+        else log("WARN","Unknown command: "..input) end
+    end
+    connect(run.MouseButton1Click,function() local raw=cmd.Text;cmd.Text="";runCommand(raw) end)
+    connect(cmd.FocusLost,function(enterPressed) if enterPressed then local raw=cmd.Text;cmd.Text="";runCommand(raw) end end)
+
+    selectTab("ESP")
+    clampWindow(true)
+    -- Dragging is limited to the header; no changes to Roblox input state.
+    local dragging=false
+    local dragStart, windowStart
+    connect(top.InputBegan,function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 then
-            active=true
-            adjust(input.Position.X)
+            dragging=true;dragStart=input.Position;windowStart=window.Position
         end
     end)
     connect(UserInputService.InputChanged,function(input)
-        if active and input.UserInputType==Enum.UserInputType.MouseMovement then
-            adjust(input.Position.X)
+        if input.UserInputType==Enum.UserInputType.MouseMovement then
+            inputDiag.mouseEvents+=1
+            inputDiag.totalMouseEvents+=1
+            local pixels=input.Delta.Magnitude
+            inputDiag.mousePixels+=pixels
+            inputDiag.totalMousePixels+=pixels
+        end
+        if dragging and input.UserInputType==Enum.UserInputType.MouseMovement then
+            local d=input.Position-dragStart
+            window.Position=UDim2.new(windowStart.X.Scale,windowStart.X.Offset+d.X,windowStart.Y.Scale,windowStart.Y.Offset+d.Y)
+            clampWindow(false)
         end
     end)
     connect(UserInputService.InputEnded,function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 then active=false end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
+        if input.UserInputType==Enum.UserInputType.MouseButton2 then aimRmbHeld=false end
     end)
-    refresh()
-end
-
-local aimPage=pages.Aimbot
-header(aimPage,"Aimbot","Smooth aim assist using confirmed enemy targets")
-groupLabel(aimPage,"TARGETING")
-toggle(aimPage,"Enable aimbot","Off by default; changes client aim when activated","aimEnabled")
-toggle(aimPage,"Hold right mouse","Aim only while holding right mouse button","aimHoldRmb")
-toggle(aimPage,"Visibility check","Only aim at unobstructed targets","aimVisibleOnly")
-local aimPointButton
-aimPointButton=action(aimPage,"Aim point: Head",function()
-    local order={"Head","Chest","Center"}
-    local nextIndex=1
-    for i,value in ipairs(order) do
-        if state.aimPoint==value then nextIndex=i%#order+1; break end
-    end
-    state.aimPoint=order[nextIndex]
-    aimPointButton.Text="Aim point: "..state.aimPoint
-    log("INFO","Aimbot aim point: "..state.aimPoint)
-end)
-groupLabel(aimPage,"CONTROL")
-settingSlider(aimPage,"FOV radius","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
-settingSlider(aimPage,"Smoothing","1 = faster, 20 = more gradual","aimSmoothing",1,20,1,"")
-toggle(aimPage,"Show FOV circle","Draw the target-selection boundary","aimFovVisible")
-local aimMethodButton
-aimMethodButton=action(aimPage,"Aim method: Auto",function()
-    local modes={"Auto","Mouse","Camera","Stabilized"}
-    local nextIndex=1
-    for i,value in ipairs(modes) do
-        if state.aimMethod==value then nextIndex=i%#modes+1; break end
-    end
-    state.aimMethod=modes[nextIndex]
-    aimMethodButton.Text="Aim method: "..state.aimMethod
-    log("INFO","Aimbot method: "..state.aimMethod)
-end)
-row(aimPage,"Runtime compatibility","Auto stabilizes Scriptable camera. Visual correction only; weapon unverified")
-groupLabel(aimPage,"STATUS")
-local aimStatusText=textLabel(aimPage,"Disabled",11,C.muted)
-aimStatusText.Size=UDim2.new(1,-3,0,24)
-
-local modifiersPage=pages.Modifiers
-header(modifiersPage,"Modifiers","Local visual gameplay adjustments")
-groupLabel(modifiersPage,"RECOIL")
-toggle(modifiersPage,"No Recoil (experimental)","Attempts to reduce camera kick while firing","noRecoil")
-settingSlider(modifiersPage,"Recoil compensation","Strength of upward camera correction","recoilStrength",0,100,5,"%")
-row(modifiersPage,"Limitations","Camera-only adjustment; actual weapon recoil and spread unchanged")
-groupLabel(modifiersPage,"STATUS")
-local recoilStatusText=textLabel(modifiersPage,"Off",11,C.muted)
-recoilStatusText.Size=UDim2.new(1,-3,0,42)
-recoilStatusText.TextWrapped=true
-groupLabel(modifiersPage,"NOTES")
-local recoilNote=textLabel(modifiersPage,"Tests require holding fire with the menu hidden. If the game controls recoil separately from Camera.CFrame, no recoil reduction may be visible.",11,C.muted)
-recoilNote.Size=UDim2.new(1,-3,0,52)
-recoilNote.TextWrapped=true
-
-groupLabel(modifiersPage,"MOVEMENT")
-toggle(modifiersPage,"Speed Hack","Local speed changes; server can reset movement","speedHack")
-settingSlider(modifiersPage,"Speed","Movement speed in studs per second","speedValue",16,120,4,"")
-toggle(modifiersPage,"Fly","WASD movement, Space up, Ctrl down","fly")
-settingSlider(modifiersPage,"Fly speed","Target flight speed","flySpeed",15,120,5,"")
-toggle(modifiersPage,"Noclip","Turns off collisions on your verified character","noclip")
-toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
-toggle(modifiersPage,"High Jump","Increases local jump impulse","highJump")
-settingSlider(modifiersPage,"Jump power","Impulse for High Jump","jumpPower",48,160,4,"")
-toggle(modifiersPage,"Bunny Hop","Automatically jumps when moving on ground","bunnyHop")
-toggle(modifiersPage,"No Fall Damage","Attempts to slow descent before landing","noFallDamage")
-groupLabel(modifiersPage,"POSITION")
-row(modifiersPage,"Teleport","Bookmark and move only your verified local character")
-action(modifiersPage,"Save position",Movement.save)
-action(modifiersPage,"Teleport to saved position",Movement.saved)
-action(modifiersPage,"Teleport forward (max 30 studs)",Movement.forward)
-groupLabel(modifiersPage,"ORIENTATION")
-toggle(modifiersPage,"Spinbot","Rotates local character; may disturb movement","spinbot")
-settingSlider(modifiersPage,"Spin rate","Degrees per second","spinRate",60,720,30," deg/s")
-toggle(modifiersPage,"Anti Aim (local visual)","Jitters local model; does NOT alter server hitbox","antiAim")
-groupLabel(modifiersPage,"MOVEMENT STATUS")
-Movement.statusLabel=textLabel(modifiersPage,"Waiting for verified local character",11,C.muted)
-Movement.statusLabel.Size=UDim2.new(1,-3,0,57)
-Movement.statusLabel.TextWrapped=true
-row(modifiersPage,"Server limitations","Server can reject speed, flight, teleport, damage changes")
-local espPage=pages.ESP
-header(espPage,"Player visuals","Configure your in-game overlay")
-groupLabel(espPage,"DISPLAY")
-toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
-toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
-toggle(espPage,"Tracers","Lines from the screen bottom toward players","tracers")
-toggle(espPage,"Skeleton","Real joints if available; posture-aware estimate otherwise","skeleton")
-toggle(espPage,"3D highlight","Client-side character highlighting","highlights")
-
--- Keep the menu fully inside the viewport, including after user dragging,
--- display resolution changes, and inconsistent custom GUI parent sizes.
-local function clampWindow(center)
-    if not alive or not window or not window.Parent then return end
-    local camera = Workspace.CurrentCamera
-    local viewport = camera and camera.ViewportSize or Vector2.new(1280,720)
-    local margin = 12
-    local width = math.floor(math.min(660, math.max(300,viewport.X - margin*2)))
-    local height = math.floor(math.min(445, math.max(265,viewport.Y - margin*2)))
-    window.Size = UDim2.fromOffset(width,height)
-    local x = window.Position.X.Scale*viewport.X + window.Position.X.Offset
-    local y = window.Position.Y.Scale*viewport.Y + window.Position.Y.Offset
-    if center then
-        x = (viewport.X-width)/2
-        y = (viewport.Y-height)/2
-    end
-    x = math.clamp(x, margin, math.max(margin, viewport.X-width-margin))
-    y = math.clamp(y, margin, math.max(margin, viewport.Y-height-margin))
-    window.Position = UDim2.fromOffset(math.floor(x+0.5),math.floor(y+0.5))
-end
-
-local settingsPage=pages.Settings
-header(settingsPage,"Settings","Interface preferences and runtime controls")
-groupLabel(settingsPage,"APPEARANCE")
-local colorButton
-colorButton=action(settingsPage,"Marker color: Cyan  (click to cycle)",function()
-    local order={"Cyan","Coral","Lime","White"}
-    local n=1
-    for i,v in ipairs(order) do
-        if v==state.color then n=i%#order+1; break end
-    end
-    state.color=order[n]
-    colorButton.Text="Marker color: "..state.color.."  (click to cycle)"
-    log("INFO","Marker color: "..state.color)
-end)
-groupLabel(settingsPage,"KEYBINDS")
-local keyText=row(settingsPage,"Right Shift","Show or hide the menu")
-local debugText=row(settingsPage,"F8","Open the diagnostic console")
-local homeText=row(settingsPage,"Home","Recenter the menu if it moves off-screen")
-row(settingsPage,"Ctrl + End","Unload SPECTRA without leaving the game")
-groupLabel(settingsPage,"CONTROL")
-action(settingsPage,"Center menu on screen",function() clampWindow(true); log("INFO","Menu recentered") end)
-action(settingsPage,"Rescan replicated models",function() discoverTargets();log("INFO","Manual scan: "..lastScanDetails) end)
-action(settingsPage,"Disable ESP markers",function() state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end; log("INFO","ESP disabled") end)
-action(settingsPage,"Unload SPECTRA completely",shutdown)
-groupLabel(settingsPage,"DESIGN NOTES")
-local note=create("TextLabel",{Text="UI and markers are created on the local client. This build never writes to weapon state, other player characters, or Phantom Forces replication interfaces.",
-    Size=UDim2.new(1,-10,0,64),TextWrapped=true,BackgroundTransparency=1,Font=Enum.Font.Gotham,TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextSize=11},settingsPage)
-
-local debugPage=pages.Debug
-header(debugPage,"Diagnostics","Read-only inspection  ·  Logs limited to 140 entries")
-debugSummary=textLabel(debugPage,"Not scanned",11,C.muted)
-debugSummary.Size=UDim2.new(1,-3,0,39)
-debugSummary.TextWrapped=true
-debugSummary.TextYAlignment=Enum.TextYAlignment.Top
-local buttons=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
-local function debugButton(text,x,callback)
-    local b=create("TextButton",{Text=text,TextSize=11,Font=Enum.Font.GothamMedium,
-        TextColor3=C.white,BackgroundColor3=C.panel2,BorderSizePixel=0,
-        Position=UDim2.new(x,0,0,0),Size=UDim2.new(0.32,-3,1,0)},buttons)
-    round(b,5);connect(b.MouseButton1Click,callback)
-end
-debugButton("Run probe",0,function() discoverTargets();log("INFO","Probe: "..lastSource.." / "..lastScanDetails) end)
-debugButton("Copy report",0.335,exportReport)
-debugButton("Clear logs",0.67,function() table.clear(logs);if logBox then logBox.Text="" end end)
-groupLabel(debugPage,"CAMERA & INPUT DIAGNOSTICS")
-local inputDiagPanel=create("Frame",{
-    Size=UDim2.new(1,-3,0,255),BackgroundColor3=C.panel,BorderSizePixel=0
-},debugPage)
-round(inputDiagPanel,6)
-inputDiagLiveText=create("TextLabel",{
-    Position=UDim2.fromOffset(10,8),Size=UDim2.new(1,-20,1,-16),
-    BackgroundTransparency=1,Text="Collecting read-only input and camera samples...",
-    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,
-    TextXAlignment=Enum.TextXAlignment.Left,TextSize=10,Font=Enum.Font.Code,
-    TextColor3=C.white,BorderSizePixel=0
-},inputDiagPanel)
-local diagActions=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
-local function diagAction(title,x,callback)
-    local b=create("TextButton",{
-        Text=title,TextSize=11,Font=Enum.Font.GothamMedium,
-        TextColor3=C.white,BackgroundColor3=C.panel2,BorderSizePixel=0,
-        Position=UDim2.new(x,0,0,0),Size=UDim2.new(0.48,-2,1,0)
-    },diagActions)
-    round(b,5)
-    connect(b.MouseButton1Click,function() safeCall(title,callback) end)
-end
-diagAction("Copy input diagnostics",0,copyInputDiagnostics)
-diagAction("Reset input counters",0.52,function()
-    resetInputDiagnostics()
-    log("INFO","Camera & input counters reset")
-end)
-groupLabel(debugPage,"EVENT LOG")
-local logPanel=create("Frame",{Size=UDim2.new(1,-3,0,210),BackgroundColor3=C.panel,BorderSizePixel=0},debugPage)
-round(logPanel,6)
-local logScroll=create("ScrollingFrame",{Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-16,1,-16),BackgroundTransparency=1,
-    BorderSizePixel=0,ScrollBarThickness=3,CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},logPanel)
-logBox=create("TextBox",{BackgroundTransparency=1,ClearTextOnFocus=false,MultiLine=true,TextEditable=false,
-    Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
-    TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
-local inputRow=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
-local cmd=create("TextBox",{PlaceholderText="status, inputdiag, probe, aimstatus, help, unload",Text="",ClearTextOnFocus=false,
-    TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,
-    PlaceholderColor3=C.muted,BackgroundColor3=C.panel,Size=UDim2.new(1,-76,1,0),BorderSizePixel=0},inputRow)
-round(cmd,5);create("UIPadding",{PaddingLeft=UDim.new(0,9)},cmd)
-local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.white,
-    BackgroundColor3=C.panel2,Size=UDim2.fromOffset(68,32),Position=UDim2.new(1,-68,0,0),BorderSizePixel=0},inputRow)
-round(run,5)
-local function runCommand(raw)
-    local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
-    elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
-        log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
-    elseif input=="inputdiag" then
-        for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
-    elseif input=="copyinput" then copyInputDiagnostics()
-    elseif input=="resetinput" then resetInputDiagnostics();log("INFO","Camera & input counters reset")
-    elseif input=="modstatus" then
-        for entry in Movement.report():gmatch("[^\n]+") do log("INFO",entry) end
-    elseif input=="modprobe" then
-        local model,root,h=Movement.find(true)
-        log("INFO","Local: "..Movement.data.status.." | model="..tostring(model and model.Name or "nil")
-            .." | root="..tostring(root and root.Name or "nil").." | humanoid="..tostring(h~=nil))
-    elseif input=="savepos" then Movement.save()
-    elseif input=="tpback" then Movement.saved()
-    elseif input=="tpforward" then Movement.forward()
-    elseif input:match("^tp%s+") then
-        local x,y,z=input:match("^tp%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)$")
-        x,y,z=tonumber(x),tonumber(y),tonumber(z)
-        if x and y and z and math.abs(x)<100000 and math.abs(y)<100000 and math.abs(z)<100000 then
-            local model=Movement.find(true)
-            if model then
-                Movement.teleport(CFrame.new(x,y,z)*model:GetPivot().Rotation)
-            else log("WARN",Movement.data.status) end
-        else log("WARN","Use tp x y z with finite numeric coordinates") end
-    elseif input=="recoilstatus" then
-        for entry in getRecoilReport():gmatch("[^\n]+") do log("INFO",entry) end
-    elseif input=="norecoil on" then state.noRecoil=true;refreshAllToggles();log("INFO","Experimental camera recoil compensation enabled")
-    elseif input=="norecoil off" then state.noRecoil=false;refreshAllToggles();log("INFO","Camera recoil compensation disabled")
-    elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
-    elseif input=="sources" then
-        local sourceLines=inspectDataSources()
-        for _, entry in ipairs(sourceLines) do log("INFO",entry) end
-    elseif input=="team" then
-        log("INFO","Calibration: "..calibrationMessage.." | events="..groupEvents)
-    elseif input=="calibrate" then calibrateEnemyFromCrosshair()
-    elseif input=="pick" then beginPicker()
-    elseif input=="clearteam" then clearCalibration();discoverTargets();log("INFO","Calibration cleared")
-    elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
-    elseif input=="targets" then
-        log("INFO","Candidates: "..#targets.."  verified="..stats.matched.." unverified="..stats.anonymous)
-        for i=1,math.min(12,#targets) do
-            local t=targets[i]
-            log("INFO",string.format("%d) %s [%s, %s]",i,t.player and t.player.Name or "calibrated enemy rig",t.source,t.player and "verified" or "group-only"))
+    connect(UserInputService.InputBegan,function(input,gameProcessed)
+        if input.UserInputType==Enum.UserInputType.MouseButton2 then
+            aimRmbHeld=not (window and window.Visible) and not UserInputService:GetFocusedTextBox()
         end
-    elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; hold RMB to activate")
-    elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
-    elseif input=="aimstatus" then
-        log("INFO","Aim: "..aimStatus.." | gameplay="..aimLastGameplayStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrides="..aimOverrideSamples.." | corrections="..aimCorrectionCount)
-        log("INFO",getAimGateDiagnostics().." | holdRMB="..tostring(state.aimHoldRmb))
-    elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
-    elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
-    elseif input=="clear" then table.clear(logs);logBox.Text=""
-    elseif input=="unload" then shutdown()
-    else log("WARN","Unknown command: "..input) end
-end
-connect(run.MouseButton1Click,function() local raw=cmd.Text;cmd.Text="";runCommand(raw) end)
-connect(cmd.FocusLost,function(enterPressed) if enterPressed then local raw=cmd.Text;cmd.Text="";runCommand(raw) end end)
+        if gameProcessed or UserInputService:GetFocusedTextBox() then return end
+        if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
+            shutdown()
+            return
+        elseif input.KeyCode==Enum.KeyCode.F6 then
+            safeCall("Enemy calibration",calibrateEnemyFromCrosshair)
+        elseif input.KeyCode==Enum.KeyCode.RightShift then
+            window.Visible=not window.Visible
+            if window.Visible then clampWindow(false) end
+        elseif input.KeyCode==Enum.KeyCode.Home then
+            clampWindow(true)
+        elseif input.KeyCode==Enum.KeyCode.F8 then
+            window.Visible=true;selectTab("Debug");clampWindow(false)
+        end
+    end)
 
-selectTab("ESP")
-clampWindow(true)
--- Dragging is limited to the header; no changes to Roblox input state.
-local dragging=false
-local dragStart, windowStart
-connect(top.InputBegan,function(input)
-    if input.UserInputType==Enum.UserInputType.MouseButton1 then
-        dragging=true;dragStart=input.Position;windowStart=window.Position
-    end
-end)
-connect(UserInputService.InputChanged,function(input)
-    if input.UserInputType==Enum.UserInputType.MouseMovement then
-        inputDiag.mouseEvents+=1
-        inputDiag.totalMouseEvents+=1
-        local pixels=input.Delta.Magnitude
-        inputDiag.mousePixels+=pixels
-        inputDiag.totalMousePixels+=pixels
-    end
-    if dragging and input.UserInputType==Enum.UserInputType.MouseMovement then
-        local d=input.Position-dragStart
-        window.Position=UDim2.new(windowStart.X.Scale,windowStart.X.Offset+d.X,windowStart.Y.Scale,windowStart.Y.Offset+d.Y)
-        clampWindow(false)
-    end
-end)
-connect(UserInputService.InputEnded,function(input)
-    if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
-    if input.UserInputType==Enum.UserInputType.MouseButton2 then aimRmbHeld=false end
-end)
-connect(UserInputService.InputBegan,function(input,gameProcessed)
-    if input.UserInputType==Enum.UserInputType.MouseButton2 then
-        aimRmbHeld=not (window and window.Visible) and not UserInputService:GetFocusedTextBox()
-    end
-    if gameProcessed or UserInputService:GetFocusedTextBox() then return end
-    if input.KeyCode==Enum.KeyCode.End and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
-        shutdown()
-        return
-    elseif input.KeyCode==Enum.KeyCode.F6 then
-        safeCall("Enemy calibration",calibrateEnemyFromCrosshair)
-    elseif input.KeyCode==Enum.KeyCode.RightShift then
-        window.Visible=not window.Visible
-        if window.Visible then clampWindow(false) end
-    elseif input.KeyCode==Enum.KeyCode.Home then
-        clampWindow(true)
-    elseif input.KeyCode==Enum.KeyCode.F8 then
-        window.Visible=true;selectTab("Debug");clampWindow(false)
-    end
-end)
-
-connect(RunService.RenderStepped,function(dt)
-    if not alive then return end
-    updateInputDiagnostics(dt)
-    stats.fps=stats.fps==0 and (1/math.max(0.001,dt)) or (stats.fps*0.92 + (1/math.max(0.001,dt))*0.08)
-    scanAccumulator += dt
-    renderAccumulator += dt
-    statAccumulator += dt
-    if scanAccumulator >= 2.2 or (scanDirty and scanAccumulator >= 0.2) then
-        scanAccumulator = 0
-        scanDirty = false
-        safeCall("Discover",discoverTargets)
-    end
-    if renderAccumulator >= UPDATE_PERIOD then
-        renderAccumulator = renderAccumulator % UPDATE_PERIOD
-        safeCall("Render",render)
-    end
-    updateAimVisual(Workspace.CurrentCamera)
-    if statAccumulator>=0.7 then
-        statAccumulator=0
-        if aimStatusText and aimStatusText.Parent then
-            aimStatusText.Text=aimStatus
+    connect(RunService.RenderStepped,function(dt)
+        if not alive then return end
+        updateInputDiagnostics(dt)
+        stats.fps=stats.fps==0 and (1/math.max(0.001,dt)) or (stats.fps*0.92 + (1/math.max(0.001,dt))*0.08)
+        scanAccumulator += dt
+        renderAccumulator += dt
+        statAccumulator += dt
+        if scanAccumulator >= 2.2 or (scanDirty and scanAccumulator >= 0.2) then
+            scanAccumulator = 0
+            scanDirty = false
+            safeCall("Discover",discoverTargets)
         end
-        if recoilStatusText and recoilStatusText.Parent then
-            recoilStatusText.Text=string.format("%s | %d writes | %.1f deg attempted",
-                recoilData.lastStatus,recoilData.writeSuccess,recoilData.suppressedDegrees)
+        if renderAccumulator >= UPDATE_PERIOD then
+            renderAccumulator = renderAccumulator % UPDATE_PERIOD
+            safeCall("Render",render)
         end
-        if Movement.statusLabel and Movement.statusLabel.Parent then
-            Movement.statusLabel.Text=Movement.data.status.."\nSource: "..Movement.data.source.." | errors: "..Movement.data.errors
-        end
-        if statusText and statusText.Parent then
-            statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
-        end
-        clampWindow(false)
-        if debugSummary and debugSummary.Parent then
-            debugSummary.Text=string.format("%s\n%s   |   render target %d Hz",lastSource,lastScanDetails,UPDATE_HZ)
-        end
-        if inputDiagLiveText and inputDiagLiveText.Parent then
-            inputDiagLiveText.Text=getInputDiagnosticsReport()
-        end
-    end
-end)
-connect(UserInputService.JumpRequest,Movement.jumpRequested)
-connect(RunService.Heartbeat,function(dt)
-    local ok,err=pcall(Movement.update,dt)
-    if not ok then
-        Movement.data.errors+=1
-        Movement.data.status="Modifier exception: "..tostring(err)
-        if Movement.data.errors<=3 then log("ERROR","Movement modifier failed: "..tostring(err)) end
-    end
-end)
-connect(Players.PlayerAdded,function(p) log("INFO","Player joined: "..p.Name);scanDirty=true end)
-connect(Players.PlayerRemoving,function(p) log("INFO","Player left: "..p.Name);scanDirty=true end)
-connect(Workspace.ChildAdded,function(child)
-    if child.Name == "Players" then watchPlayerFolder() end
-end)
-connect(Workspace.ChildRemoved,function(child)
-    if child == watchedRoot then watchPlayerFolder() end
-end)
-connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
-    if aimObservedCameraConnection then
-        aimObservedCameraConnection:Disconnect()
-        aimObservedCameraConnection=nil
-    end
-    aimObservedCamera=nil
-    disableAimCorrection()
-    detachRecoilCamera()
-    for _,w in pairs(widgets) do if w.highlight then w.highlight:Destroy();w.highlight=nil end end
-    clampWindow(false)
-    log("INFO","Camera changed; optional highlights reset")
-end)
-
-local aimBindOk,aimBindError=pcall(function()
-    -- The game's camera is custom-controlled; apply this optional client-only
-    -- visual aim adjustment late in the render phase rather than just after
-    -- Roblox's default camera priority.
-    RunService:BindToRenderStep(AIM_RENDER_BIND,Enum.RenderPriority.Last.Value-1,function(dt)
-        local ok,err=pcall(runAimbot,dt)
-        if not ok then
-            aimErrors+=1
-            aimGateCounts.renderErrors+=1
-            aimLastGameplayStatus="Aimbot runtime error: "..tostring(err)
-            aimLastGameplayTime=os.date("%H:%M:%S")
-            if aimErrors<=3 then log("ERROR","Aimbot update failed: "..tostring(err)) end
-        end
-        -- Recoil camera compensation is a separate modifier and may run even
-        -- while aimbot is disabled. It never modifies weapon or network state.
-        local recoilOK,recoilError=pcall(updateRecoilModifier)
-        if not recoilOK then
-            recoilData.writeErrors+=1
-            recoilData.lastStatus="Modifier runtime error"
-            if recoilData.writeErrors<=3 then
-                log("ERROR","Recoil modifier failed: "..tostring(recoilError))
+        updateAimVisual(Workspace.CurrentCamera)
+        if statAccumulator>=0.7 then
+            statAccumulator=0
+            if aimStatusText and aimStatusText.Parent then
+                aimStatusText.Text=aimStatus
+            end
+            if recoilStatusText and recoilStatusText.Parent then
+                recoilStatusText.Text=string.format("%s | %d writes | %.1f deg attempted",
+                    recoilData.lastStatus,recoilData.writeSuccess,recoilData.suppressedDegrees)
+            end
+            if Movement.statusLabel and Movement.statusLabel.Parent then
+                Movement.statusLabel.Text=Movement.data.status.."\nSource: "..Movement.data.source.." | errors: "..Movement.data.errors
+            end
+            if statusText and statusText.Parent then
+                statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
+            end
+            clampWindow(false)
+            if debugSummary and debugSummary.Parent then
+                debugSummary.Text=string.format("%s\n%s   |   render target %d Hz",lastSource,lastScanDetails,UPDATE_HZ)
+            end
+            if inputDiagLiveText and inputDiagLiveText.Parent then
+                inputDiagLiveText.Text=getInputDiagnosticsReport()
             end
         end
     end)
-end)
-if not aimBindOk then
-    log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
+    connect(UserInputService.JumpRequest,Movement.jumpRequested)
+    connect(RunService.Heartbeat,function(dt)
+        local ok,err=pcall(Movement.update,dt)
+        if not ok then
+            Movement.data.errors+=1
+            Movement.data.status="Modifier exception: "..tostring(err)
+            if Movement.data.errors<=3 then log("ERROR","Movement modifier failed: "..tostring(err)) end
+        end
+    end)
+    connect(Players.PlayerAdded,function(p) log("INFO","Player joined: "..p.Name);scanDirty=true end)
+    connect(Players.PlayerRemoving,function(p) log("INFO","Player left: "..p.Name);scanDirty=true end)
+    connect(Workspace.ChildAdded,function(child)
+        if child.Name == "Players" then watchPlayerFolder() end
+    end)
+    connect(Workspace.ChildRemoved,function(child)
+        if child == watchedRoot then watchPlayerFolder() end
+    end)
+    connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),function()
+        if aimObservedCameraConnection then
+            aimObservedCameraConnection:Disconnect()
+            aimObservedCameraConnection=nil
+        end
+        aimObservedCamera=nil
+        disableAimCorrection()
+        detachRecoilCamera()
+        for _,w in pairs(widgets) do if w.highlight then w.highlight:Destroy();w.highlight=nil end end
+        clampWindow(false)
+        log("INFO","Camera changed; optional highlights reset")
+    end)
+
+    local aimBindOk,aimBindError=pcall(function()
+        -- The game's camera is custom-controlled; apply this optional client-only
+        -- visual aim adjustment late in the render phase rather than just after
+        -- Roblox's default camera priority.
+        RunService:BindToRenderStep(AIM_RENDER_BIND,Enum.RenderPriority.Last.Value-1,function(dt)
+            local ok,err=pcall(runAimbot,dt)
+            if not ok then
+                aimErrors+=1
+                aimGateCounts.renderErrors+=1
+                aimLastGameplayStatus="Aimbot runtime error: "..tostring(err)
+                aimLastGameplayTime=os.date("%H:%M:%S")
+                if aimErrors<=3 then log("ERROR","Aimbot update failed: "..tostring(err)) end
+            end
+            -- Recoil camera compensation is a separate modifier and may run even
+            -- while aimbot is disabled. It never modifies weapon or network state.
+            local recoilOK,recoilError=pcall(updateRecoilModifier)
+            if not recoilOK then
+                recoilData.writeErrors+=1
+                recoilData.lastStatus="Modifier runtime error"
+                if recoilData.writeErrors<=3 then
+                    log("ERROR","Recoil modifier failed: "..tostring(recoilError))
+                end
+            end
+        end)
+    end)
+    if not aimBindOk then
+        log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
+    end
+    log("INFO","SPECTRA Phase 1 v1.9.2 loaded. Scoped UI and movement startup to reduce Luau register use | ESP+Skeleton ON")
+    log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
+    watchPlayerFolder()
+    safeCall("Initial scan",discoverTargets)
+    log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
 end
-log("INFO","SPECTRA Phase 1 v1.9.1 loaded. Scoped movement module to avoid Luau local-register limit | ESP+Skeleton ON")
-log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
-watchPlayerFolder()
-safeCall("Initial scan",discoverTargets)
-log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
+
+launchSpectraUI()
