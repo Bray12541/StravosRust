@@ -1936,6 +1936,7 @@ local function getInputDiagnosticsLines()
             aimCorrectionActive and "active" or "inactive",
             aimCorrectionCount,aimCorrectionObservations,aimCorrectionErrors),
         getRecoilReport(),
+        movementReport(),
         "Mouse reports and camera writes do not prove weapon-aim control."
     }
     return lines
@@ -2066,6 +2067,7 @@ local function report()
         "Aim RMB setting: "..tostring(state.aimHoldRmb).." | "..getAimGateDiagnostics(),
         "Aim updates: "..aimUpdates.." | errors: "..aimErrors,
         getRecoilReport(),
+        movementReport(),
         "Aim last active: "..aimLastActiveStatus,
         "Aim camera writes with movement: "..aimCameraMoved.."/"..aimMovementSamples
             .." | suspected overrides: "..aimCameraResetEvents,
@@ -2106,6 +2108,7 @@ local function shutdown()
     pcall(function() RunService:UnbindFromRenderStep(AIM_RENDER_BIND) end)
     aimRmbHeld=false
     detachRecoilCamera()
+    restoreMovement()
     disableAimCorrection()
     if aimObservedCameraConnection then
         pcall(function() aimObservedCameraConnection:Disconnect() end)
@@ -2360,6 +2363,31 @@ local recoilNote=textLabel(modifiersPage,"Tests require holding fire with the me
 recoilNote.Size=UDim2.new(1,-3,0,52)
 recoilNote.TextWrapped=true
 
+groupLabel(modifiersPage,"MOVEMENT")
+toggle(modifiersPage,"Speed Hack","Local speed changes; server can reset movement","speedHack")
+settingSlider(modifiersPage,"Speed","Movement speed in studs per second","speedValue",16,120,4,"")
+toggle(modifiersPage,"Fly","WASD movement, Space up, Ctrl down","fly")
+settingSlider(modifiersPage,"Fly speed","Target flight speed","flySpeed",15,120,5,"")
+toggle(modifiersPage,"Noclip","Turns off collisions on your verified character","noclip")
+toggle(modifiersPage,"Infinite Jump","Attempts jumping again while in the air","infiniteJump")
+toggle(modifiersPage,"High Jump","Increases local jump impulse","highJump")
+settingSlider(modifiersPage,"Jump power","Impulse for High Jump","jumpPower",48,160,4,"")
+toggle(modifiersPage,"Bunny Hop","Automatically jumps when moving on ground","bunnyHop")
+toggle(modifiersPage,"No Fall Damage","Attempts to slow descent before landing","noFallDamage")
+groupLabel(modifiersPage,"POSITION")
+row(modifiersPage,"Teleport","Bookmark and move only your verified local character")
+action(modifiersPage,"Save position",movementSavePosition)
+action(modifiersPage,"Teleport to saved position",movementTeleportSaved)
+action(modifiersPage,"Teleport forward (max 30 studs)",movementTeleportForward)
+groupLabel(modifiersPage,"ORIENTATION")
+toggle(modifiersPage,"Spinbot","Rotates local character; may disturb movement","spinbot")
+settingSlider(modifiersPage,"Spin rate","Degrees per second","spinRate",60,720,30," deg/s")
+toggle(modifiersPage,"Anti Aim (local visual)","Jitters local model; does NOT alter server hitbox","antiAim")
+groupLabel(modifiersPage,"MOVEMENT STATUS")
+movementStatusText=textLabel(modifiersPage,"Waiting for verified local character",11,C.muted)
+movementStatusText.Size=UDim2.new(1,-3,0,57)
+movementStatusText.TextWrapped=true
+row(modifiersPage,"Server limitations","Server can reject speed, flight, teleport, damage changes")
 local espPage=pages.ESP
 header(espPage,"Player visuals","Configure your in-game overlay")
 groupLabel(espPage,"DISPLAY")
@@ -2479,13 +2507,31 @@ local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=1
 round(run,5)
 local function runCommand(raw)
     local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-    if input=="help" then log("INFO","Commands: help, status, inputdiag, copyinput, resetinput, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+    if input=="help" then log("INFO","Commands: help, status, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
     elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
         log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
     elseif input=="inputdiag" then
         for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
     elseif input=="copyinput" then copyInputDiagnostics()
     elseif input=="resetinput" then resetInputDiagnostics();log("INFO","Camera & input counters reset")
+    elseif input=="modstatus" then
+        for entry in movementReport():gmatch("[^\n]+") do log("INFO",entry) end
+    elseif input=="modprobe" then
+        local model,root,h=findMovementRig(true)
+        log("INFO","Local: "..movement.status.." | model="..tostring(model and model.Name or "nil")
+            .." | root="..tostring(root and root.Name or "nil").." | humanoid="..tostring(h~=nil))
+    elseif input=="savepos" then movementSavePosition()
+    elseif input=="tpback" then movementTeleportSaved()
+    elseif input=="tpforward" then movementTeleportForward()
+    elseif input:match("^tp%s+") then
+        local x,y,z=input:match("^tp%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)%s+([%+%-%.%d]+)$")
+        x,y,z=tonumber(x),tonumber(y),tonumber(z)
+        if x and y and z and math.abs(x)<100000 and math.abs(y)<100000 and math.abs(z)<100000 then
+            local model=findMovementRig(true)
+            if model then
+                movementTeleport(CFrame.new(x,y,z)*model:GetPivot().Rotation)
+            else log("WARN",movement.status) end
+        else log("WARN","Use tp x y z with finite numeric coordinates") end
     elseif input=="recoilstatus" then
         for entry in getRecoilReport():gmatch("[^\n]+") do log("INFO",entry) end
     elseif input=="norecoil on" then state.noRecoil=true;refreshAllToggles();log("INFO","Experimental camera recoil compensation enabled")
@@ -2594,6 +2640,9 @@ connect(RunService.RenderStepped,function(dt)
             recoilStatusText.Text=string.format("%s | %d writes | %.1f deg attempted",
                 recoilData.lastStatus,recoilData.writeSuccess,recoilData.suppressedDegrees)
         end
+        if movementStatusText and movementStatusText.Parent then
+            movementStatusText.Text=movement.status.."\nSource: "..movement.source.." | errors: "..movement.errors
+        end
         if statusText and statusText.Parent then
             statusText.Text=string.format("v%s · ESP %s · %d targets / %d unknown · %d shown · %d FPS",VERSION,state.enabled and "ON" or "OFF",#targets,stats.anonymous+stats.unknownTeams,stats.rendered,math.floor(stats.fps+0.5))
         end
@@ -2604,6 +2653,15 @@ connect(RunService.RenderStepped,function(dt)
         if inputDiagLiveText and inputDiagLiveText.Parent then
             inputDiagLiveText.Text=getInputDiagnosticsReport()
         end
+    end
+end)
+connect(UserInputService.JumpRequest,movementJumpRequested)
+connect(RunService.Heartbeat,function(dt)
+    local ok,err=pcall(updateMovement,dt)
+    if not ok then
+        movement.errors+=1
+        movement.status="Modifier exception: "..tostring(err)
+        if movement.errors<=3 then log("ERROR","Movement modifier failed: "..tostring(err)) end
     end
 end)
 connect(Players.PlayerAdded,function(p) log("INFO","Player joined: "..p.Name);scanDirty=true end)
@@ -2655,7 +2713,7 @@ end)
 if not aimBindOk then
     log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
 end
-log("INFO","SPECTRA Phase 1 v1.8.0 loaded. Modifiers tab with experimental camera recoil control | ESP+Skeleton ON")
+log("INFO","SPECTRA Phase 1 v1.9.0 loaded. Movement Modifiers; verified-local rig required | ESP+Skeleton ON")
 log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
 watchPlayerFolder()
 safeCall("Initial scan",discoverTargets)
