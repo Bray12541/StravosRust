@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.10.4
+    SPECTRA / PHASE 1                         v1.11.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.10.4"
+local VERSION = "1.11.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -1558,7 +1558,137 @@ local function updateRecoilModifier()
 end
 
 
--- MOVEMENT MODIFIERS: verified self-rig only.
+-- SESSION-ONLY CHARACTER CALIBRATION ------------------------------------------
+-- Manual, explicit confirmation of a camera-followed model after an opt-in
+-- input/motion observation. This is NOT Roblox's ownership verification.
+-- Pending/confirmed models are never persisted and expire on camera or rig
+-- changes, remote ownership matches, or a conflicting Player.Character.
+local SelfCalibration=(function()
+    local cal={pending=nil,active=nil,status="No session calibration"}
+    local function currentContext()
+        local camera=Workspace.CurrentCamera
+        local subject=camera and camera.CameraSubject
+        local model=subject and (subject:IsA("Model") and subject
+            or subject:FindFirstAncestorWhichIsA("Model")) or nil
+        local root=model and getRoot(model) or nil
+        return camera,subject,model,root
+    end
+    local function verifyContext(record)
+        if not record then return false,"No candidate" end
+        local camera,subject,model,root=currentContext()
+        if camera~=record.camera or subject~=record.subject or model~=record.model
+            or root~=record.root then
+            return false,"Camera or character model changed (respawn/spectator possible)"
+        end
+        if not model or not model.Parent or not root or not root.Parent
+            or not subject or not subject.Parent then
+            return false,"Character model or camera subject was removed"
+        end
+        if root.Anchored then return false,"Root became anchored" end
+        if LocalPlayer.Character and LocalPlayer.Character~=model then
+            return false,"Player.Character points to a different character"
+        end
+        local known=identifyPlayer(model)
+        if known and known~=LocalPlayer then
+            return false,"Model identified as another player"
+        end
+        local ok,native=pcall(function() return Players:GetPlayerFromCharacter(model) end)
+        if ok and native and native~=LocalPlayer then
+            return false,"Native owner lookup identifies another player"
+        end
+        if subject:IsA("Humanoid") then
+            local healthOK,health=pcall(function() return subject.Health end)
+            if healthOK and type(health)=="number" and health<=0 then
+                return false,"Humanoid has died"
+            end
+        end
+        local distOk,dist=pcall(function()
+            return (camera.CFrame.Position-root.Position).Magnitude
+        end)
+        if not distOk or dist>12 then return false,"Camera no longer near character root" end
+        return true,"Camera/model match"
+    end
+    local function clear(reason)
+        local wasActive=cal.active~=nil
+        local hadPending=cal.pending~=nil
+        cal.pending=nil
+        cal.active=nil
+        cal.status="Not calibrated: "..tostring(reason or "cleared")
+        if wasActive or hadPending then
+            print("[SPECTRA CAL] "..cal.status)
+        end
+    end
+    local function offer(observation)
+        cal.pending=nil
+        if not observation or observation.changedSubject~=0
+            or observation.samplesWithInput<12 or observation.motionAndInput<10
+            or observation.secondsWithInput<2 or observation.rootPath<15 then
+            cal.status="No eligible candidate: insufficient stable input/motion evidence"
+            return false
+        end
+        local camera,subject,model,root=currentContext()
+        local candidate={camera=camera,subject=subject,model=model,root=root,time=os.clock()}
+        local ok,reason=verifyContext(candidate)
+        if not ok then
+            cal.status="No eligible candidate: "..reason
+            return false
+        end
+        if not subject:IsA("Humanoid") then
+            cal.status="No eligible candidate: camera subject is not a Humanoid"
+            return false
+        end
+        cal.pending=candidate
+        cal.status="Candidate ready: "..model.Name.." | owner UNVERIFIED; confirm manually in Compat"
+        print("[SPECTRA CAL] "..cal.status)
+        return true
+    end
+    local function confirm()
+        local p=cal.pending
+        if not p then
+            log("WARN","No calibrated candidate. Run the 10s WASD observation first.")
+            return false
+        end
+        if os.clock()-p.time>60 then
+            clear("Candidate expired; rerun 10s observation")
+            return false
+        end
+        local ok,reason=verifyContext(p)
+        if not ok then clear(reason);return false end
+        cal.active=p
+        cal.pending=nil
+        cal.status="SESSION-CONFIRMED camera-followed model "..p.model.Name
+            .." (ownership NOT verified; client-only attempts)"
+        print("[SPECTRA CAL] "..cal.status)
+        log("WARN","Manual camera-rig confirmation is not Roblox ownership proof. Server acceptance remains unverified.")
+        return true
+    end
+    local function validate()
+        if not cal.active then return false end
+        local ok,reason=verifyContext(cal.active)
+        if not ok then clear(reason);return false end
+        return true
+    end
+    local function isCurrent(model)
+        return validate() and model~=nil and model==cal.active.model
+    end
+    local function status()
+        if cal.active then validate() end
+        if cal.pending then
+            local ok,reason=verifyContext(cal.pending)
+            if not ok then clear(reason) end
+        end
+        return cal.status
+    end
+    cal.offer=offer
+    cal.confirm=confirm
+    cal.clear=clear
+    cal.validate=validate
+    cal.isCurrent=isCurrent
+    cal.statusText=status
+    return cal
+end)()
+
+-- MOVEMENT MODIFIERS: verified or explicitly session-confirmed self-rig only.
 -- Private function scope avoids exhausting Luau main-chunk local registers.
 local Movement = (function()
     -- A custom game controller
@@ -1608,7 +1738,8 @@ local Movement = (function()
 
     local function setMovementRig(model,source)
         if not model or not model.Parent or not model:IsA("Model") then return false end
-        if model~=LocalPlayer.Character and identifyPlayer(model)~=LocalPlayer then return false end
+        if model~=LocalPlayer.Character and identifyPlayer(model)~=LocalPlayer
+            and not SelfCalibration.isCurrent(model) then return false end
         local root=getRoot(model)
         if not root or not root:IsA("BasePart") or not root.Parent then return false end
         if model~=movement.model or root~=movement.root then
@@ -1620,13 +1751,16 @@ local Movement = (function()
             movement.verifiedFrames=0
             movement.antiOffset=0
         end
-        movement.status="Verified local character ("..source..")"
+        movement.status=(SelfCalibration.isCurrent(model)
+            and "Session-confirmed camera rig; ownership UNVERIFIED ("..source..")"
+            or "Verified local character ("..source..")")
         return true
     end
 
     local function findMovementRig(force)
         if not force and movement.root and movement.root.Parent and movement.model and movement.model.Parent
-            and (movement.model==LocalPlayer.Character or identifyPlayer(movement.model)==LocalPlayer) then
+            and (movement.model==LocalPlayer.Character or identifyPlayer(movement.model)==LocalPlayer
+                or SelfCalibration.isCurrent(movement.model)) then
             return movement.model,movement.root,movement.humanoid
         end
         if not force and os.clock()-movement.lastScan<0.8 then return nil,nil,nil end
@@ -1638,7 +1772,8 @@ local Movement = (function()
         local subject=camera and camera.CameraSubject
         if subject then
             local ancestor=subject:IsA("Model") and subject or subject:FindFirstAncestorWhichIsA("Model")
-            if setMovementRig(ancestor,"identified CameraSubject") then
+            if setMovementRig(ancestor,SelfCalibration.isCurrent(ancestor)
+                and "manual session camera-rig confirmation" or "identified CameraSubject") then
                 return movement.model,movement.root,movement.humanoid
             end
         end
@@ -1844,6 +1979,7 @@ local Movement = (function()
         end
         return table.concat({
             "Movement: "..movement.status.." | source="..movement.source.." | saved="..tostring(movement.saved~=nil),
+            "Session calibration: "..SelfCalibration.statusText(),
             status("Speed",state.speedHack),
             status("Fly",state.fly),
             status("Noclip",state.noclip),
@@ -2102,6 +2238,7 @@ local Compat=(function()
                 status,c.samples,c.secondsWithInput,c.samplesWithMotion,c.motionAndInput,
                 c.humanoidMoveSamples,c.changedSubject,c.rootPath,c.cameraPath)
             print("[SPECTRA COMPAT MOTION] "..compat.lastObservation:gsub("\n"," | "))
+            SelfCalibration.offer(c)
             log("INFO","Read-only movement observation completed; run compat to view result")
         end
     end
@@ -2288,6 +2425,7 @@ local Compat=(function()
         end
         local status=category(candidate,root,hum)
         line("Movement API: "..status)
+        line("Session camera-model calibration: "..SelfCalibration.statusText())
         line("")
         line("[OPT-IN MOVEMENT OBSERVATION]")
         line(compat.lastObservation)
@@ -2631,6 +2769,7 @@ local function shutdown()
     aimRmbHeld=false
     detachRecoilCamera()
     Movement.restore()
+    SelfCalibration.clear("SPECTRA unloaded")
     disableAimCorrection()
     if aimObservedCameraConnection then
         pcall(function() aimObservedCameraConnection:Disconnect() end)
@@ -2679,7 +2818,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.10.4",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.11.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -2967,6 +3106,12 @@ local function launchSpectraUI()
         log("INFO","Compatibility snapshot printed with [SPECTRA COMPAT] prefix")
     end)
     action(compatPage,"Start 10s WASD + camera motion observation",Compat.startObservation)
+    action(compatPage,"Confirm tracked model for this session",SelfCalibration.confirm)
+    action(compatPage,"Clear session character calibration",function()
+        Movement.restore()
+        Movement.data.model=nil;Movement.data.root=nil;Movement.data.humanoid=nil
+        SelfCalibration.clear("Cleared by user")
+    end)
     action(compatPage,"Copy compatibility report",Compat.copy)
     row(compatPage,"How to use","Press Refresh after spawning or toggling a modifier")
     local compatReportView=create("TextBox",{
@@ -3069,7 +3214,7 @@ local function launchSpectraUI()
     round(run,5)
     local function runCommand(raw)
         local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
+        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, compatconfirm, compatclear, copycompat, inputdiag, modstatus, modprobe, savepos, tpback, tpforward, tp x y z, recoilstatus, norecoil on/off, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
         elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
             log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
         elseif input=="compat" then
@@ -3079,6 +3224,12 @@ local function launchSpectraUI()
             end)
         elseif input=="compatmove" then
             safeCall("Read-only input and motion observation",Compat.startObservation)
+        elseif input=="compatconfirm" then
+            safeCall("Session character confirmation",SelfCalibration.confirm)
+        elseif input=="compatclear" then
+            Movement.restore()
+            Movement.data.model=nil;Movement.data.root=nil;Movement.data.humanoid=nil
+            SelfCalibration.clear("Cleared by user")
         elseif input=="copycompat" then
             safeCall("Copy compatibility",Compat.copy)
         elseif input=="inputdiag" then
@@ -3245,6 +3396,13 @@ local function launchSpectraUI()
             log("ERROR","Read-only motion observation failed: "..tostring(observeError))
             Compat.observation=nil
         end
+        local hadCalibration=SelfCalibration.active~=nil
+        if hadCalibration and not SelfCalibration.validate() then
+            -- Restore original properties before the next movement write.
+            Movement.restore()
+            Movement.data.model=nil;Movement.data.root=nil
+            Movement.data.humanoid=nil;Movement.data.source="none"
+        end
         local ok,err=pcall(Movement.update,dt)
         if not ok then
             Movement.data.errors+=1
@@ -3301,7 +3459,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.10.4 loaded. Read-only control-correlation inspector with respawn guard | ESP+Skeleton ON")
+    log("INFO","SPECTRA Phase 1 v1.11.0 loaded. Session-only, manual camera-character calibration with invalidation guards")
     log("INFO","Automatic 1v1 opponent group identification enabled. Larger lobbies require reliable game team data.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
