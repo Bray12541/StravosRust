@@ -3704,7 +3704,7 @@ local function launchSpectraUI()
         Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
         TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
     local function copyFullEventLog()
-        local data=table.concat(logs,"\\n")
+        local data=table.concat(logs,"\n")
         if data=="" then
             log("WARN","Event log is empty")
             copyLogButton.Text="LOG IS EMPTY"
