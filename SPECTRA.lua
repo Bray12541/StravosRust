@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.26.0
+    SPECTRA / PHASE 1                         v1.26.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.26.0"
+local VERSION = "1.26.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -3145,7 +3145,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.26.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.26.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3852,13 +3852,71 @@ local function launchSpectraUI()
             log("INFO","-- CONSOLE COMMAND CENTER / v"..VERSION.." --")
             log("INFO","settings | get KEY | set KEY VALUE | toggle KEY | resetsettings")
             log("INFO","tab Aimbot/ESP/Modifiers/Compat/Settings/Debug")
-            log("INFO","status | aimstatus | probe | sources | targets | team")
-            log("INFO","calibrate | pick | clearteam | rescan")
+            log("INFO","diagnose (full snapshot to clipboard) | status | aimstatus")
+            log("INFO","probe | sources | targets | team | calibrate | pick | clearteam | rescan")
             log("INFO","compat | compatmove | compatclear | copycompat")
             log("INFO","inputdiag | copyinput | resetinput | modprobe | modstatus")
             log("INFO","copyreport | copylogs | find TEXT | history")
             log("INFO","recenter | esp on/off | aimbot on/off | clear | unload")
             log("INFO","Examples: set fov 200 ; toggle skeleton ; set aimMethod Auto")
+        elseif verb=="diagnose" or verb=="healthcheck" then
+            -- A single reproducible capture of the exact client-visible
+            -- state. Never guesses hidden player positions and never changes
+            -- aim/ESP settings.
+            local stages={}
+            local function stage(label,fn)
+                local ok,err=pcall(fn)
+                stages[#stages+1]=label..": "..(ok and "OK" or ("ERROR "..tostring(err)))
+                return ok
+            end
+            stage("Fresh ESP model discovery",function()
+                fallbackNextScan=0
+                discoverTargets()
+            end)
+            stage("Fresh compatibility snapshot",function()
+                Compat.emit()
+            end)
+            local ok,details=pcall(report)
+            if not ok then
+                stages[#stages+1]="Full report generation: ERROR "..tostring(details)
+                details="Report failed: "..tostring(details)
+            end
+            local camera=Workspace.CurrentCamera
+            local summary={
+                "SPECTRA ONE-STEP DIAGNOSTICS / v"..VERSION,
+                "PlaceId: "..tostring(game.PlaceId),
+                "Players: "..tostring(#Players:GetPlayers()),
+                "Camera type: "..(camera and camera.CameraType.Name or "unavailable"),
+                "ESP enabled: "..tostring(state.enabled)
+                    .." | targets: "..tostring(#targets)
+                    .." | displayed: "..tostring(stats.rendered),
+                "Enemy/team calibration: "..calibrationMode.." | "..calibrationMessage,
+                "Source: "..lastSource,
+                "Discovery: "..lastScanDetails,
+                "Fallback: "..fallbackSummary,
+                "ESP rendering errors: "..tostring(stats.espRenderErrors or 0),
+                "Aimbot enabled: "..tostring(state.aimEnabled)
+                    .." | backend: "..aimBackend
+                    .." | errors: "..tostring(aimErrors),
+                "Connection counts: "..#connections.." tracked; "
+                    ..#watcherConnections.." source watchers",
+                "-- CAPTURE STAGES --"
+            }
+            for _,entry in ipairs(stages) do summary[#summary+1]=entry end
+            summary[#summary+1]="-- COMPLETE REPORT --"
+            summary[#summary+1]=details
+            local bundle=table.concat(summary,"\n")
+            log("INFO","DIAGNOSE: "..#targets.." targets / "..stats.rendered
+                .." shown / "..(stats.espRenderErrors or 0).." render errors")
+            log("INFO","DIAGNOSE: "..fallbackSummary)
+            if type(setclipboard)=="function" and pcall(setclipboard,bundle) then
+                log("INFO","Complete diagnostic bundle copied to clipboard; paste it into chat.")
+            else
+                print("[SPECTRA DIAGNOSE] BEGIN")
+                print(bundle)
+                print("[SPECTRA DIAGNOSE] END")
+                log("WARN","Clipboard unavailable; full bundle printed to executor/Roblox log.")
+            end
         elseif verb=="status" then
             log("INFO","v"..VERSION.." | Aimbot="..tostring(state.aimEnabled)
                 .." | "..aimStatus.." | method="..state.aimMethod
@@ -3989,7 +4047,10 @@ local function launchSpectraUI()
     groupLabel(debugPage,"CONSOLE QUICK REFERENCE")
     row(debugPage,"Menu settings","settings · get aimFovRadius · set fov 200 · toggle skeleton")
     row(debugPage,"Navigation","tab ESP · tab Aimbot · tab Settings · tab Debug")
-    row(debugPage,"Troubleshooting","probe · sources · compat · aimstatus · copyreport")
+    row(debugPage,"Troubleshooting","diagnose · probe · sources · aimstatus · copyreport")
+    action(debugPage,"Run full diagnostics & copy bundle",function()
+        runCommand("diagnose")
+    end)
     action(debugPage,"Print full command help",function() runCommand("help") end)
     action(debugPage,"Show every menu setting",function() runCommand("settings") end)
 
@@ -4162,7 +4223,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.26.0 loaded. Unified debug console, settings commands and ESP diagnostics")
+    log("INFO","SPECTRA Phase 1 v1.26.1 loaded. One-command diagnostic bundle and verified-enemy ESP filtering")
     log("INFO","Strict ESP filter active: unknown and allied rigs are never shown. F6 can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
