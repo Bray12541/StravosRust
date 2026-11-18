@@ -158,6 +158,11 @@ local function getCharacterParts(player)
 end
 
 -- Player markers --------------------------------------------------------------
+-- Opponent "through walls" dev view: needs the player's setting and the
+-- server's Workspace switch; authorization was already checked at startup.
+local function xrayAllowed()
+    return state.opponentXray and Workspace:GetAttribute(Shared.XRAY_ATTRIBUTE) == true
+end
 local function destroyMarker(player)
     local m = markers[player]
     if not m then return end
@@ -197,9 +202,10 @@ local function updateMarkers()
             if not m then m = {}; markers[player] = m end
             local color = relationColor(player, relation)
             -- Teammates are visible through walls (standard squad UI).
-            -- Opponents use Occluded depth, so they are only outlined where
-            -- the local player can already see them.
-            local depth = relation == "teammate" and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+            -- Opponents use Occluded depth (only outlined in line of sight)
+            -- unless the dev view is on AND the server's switch allows it.
+            local seeThrough = relation == "teammate" or xrayAllowed()
+            local depth = seeThrough and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
 
             if wantsHighlight then
                 if not m.highlight or m.highlight.Adornee ~= character or not m.highlight.Parent then
@@ -228,7 +234,7 @@ local function updateMarkers()
                         TextSize=12, TextStrokeTransparency=0.4, TextWrapped=true,
                     }, m.tag)
                 end
-                m.tag.AlwaysOnTop = relation == "teammate"
+                m.tag.AlwaysOnTop = seeThrough
                 local text = player.DisplayName
                 if hasTeams() then text ..= "  ·  " .. (player.Team and player.Team.Name or "No team") end
                 if state.distances and distance then text ..= "\n" .. math.floor(distance + 0.5) .. " studs" end
@@ -668,11 +674,12 @@ local function launchSpectraUI()
 
     -- Visuals -------------------------------------------------------------------
     local visualsPage = pages.Visuals
-    header(visualsPage, "Visuals", "Highlights and tags. Opponents are only outlined in line of sight")
+    header(visualsPage, "Visuals", "Highlights and tags for teammates and opponents")
     groupLabel(visualsPage, "HIGHLIGHTS")
     toggle(visualsPage, SCHEMA.highlights.label, "Master switch for player outlines", "highlights")
     toggle(visualsPage, SCHEMA.teammates.label, "Squad outline, visible through walls", "teammates")
-    toggle(visualsPage, SCHEMA.opponents.label, "Occluded depth: hidden behind geometry", "opponents")
+    toggle(visualsPage, SCHEMA.opponents.label, "Outline and tag other-team players", "opponents")
+    toggle(visualsPage, SCHEMA.opponentXray.label, "Show opponents through walls (server switch required)", "opponentXray")
     toggle(visualsPage, SCHEMA.teamColors.label, "Color by Team; otherwise accent/green", "teamColors")
     settingSlider(visualsPage, "Higher is more see-through", "fillTransparency")
     groupLabel(visualsPage, "TAGS")
@@ -794,7 +801,7 @@ local function launchSpectraUI()
         highlight="highlights", outlines="highlights", team="teammates", allies="teammates",
         enemies="opponents", tags="nameTags", names="nameTags", distance="distances",
         range="maxDistance", fill="fillTransparency", assist="assistEnabled", aimassist="assistEnabled",
-        strength="assistStrength", radius="assistRadius", fov="assistRadius", ring="assistRingVisible",
+        strength="assistStrength", radius="assistRadius", fov="assistRadius", ring="assistRingVisible", xray="opponentXray", walls="opponentXray",
         colors="teamColors", accent="color",
     }
     local function resolveKey(raw)

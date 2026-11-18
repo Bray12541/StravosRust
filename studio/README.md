@@ -49,7 +49,7 @@ The aim-assist demo also needs `CONFIG.AimAssistDemoEnabled`. The server publish
 
 - **Players tab:** a live roster with team, relation, health and distance, from your own `Players`/`Teams`.
 - **Team identification:** based on `Player.Team`. Neutral players are never counted as teammates. With no Teams, the game is treated as free-for-all.
-- **Visuals:** `Highlight` outlines and name/team/distance tags. Teammates show through walls. Opponents use Occluded depth, so they only show where you can already see them. Roblox renders at most 31 highlights.
+- **Visuals:** `Highlight` outlines and name/team/distance tags. Teammates show through walls. Opponents use Occluded depth, so they only show where you can already see them. The **Opponents through walls (dev view)** toggle (`toggle xray`) shows opponents through walls too. It's off by default and needs the server switch `CONFIG.OpponentXrayEnabled`; set that to `false` before publishing if players shouldn't have it. Roblox renders at most 31 highlights.
 - **Aim-assist demo:** friction only. Mouse sensitivity drops while the reticle is over a visible opponent within the radius, and the camera never rotates toward anyone. It doesn't run while the menu is open.
 
 ## Not verified

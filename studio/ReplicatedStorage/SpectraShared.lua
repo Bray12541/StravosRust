@@ -13,6 +13,7 @@ Shared.VERSION = "2.0.0-studio"
 Shared.REMOTE_FOLDER = "SpectraRemotes"
 Shared.AUTH_ATTRIBUTE = "SpectraAuthorized"      -- set on Player by the server
 Shared.ASSIST_ATTRIBUTE = "SpectraAimAssistDemo" -- set on Workspace by the server
+Shared.XRAY_ATTRIBUTE = "SpectraOpponentXray"    -- set on Workspace by the server
 
 Shared.COLOR_MODES = {
     Cyan = Color3.fromRGB(82, 209, 227),
@@ -26,7 +27,8 @@ Shared.COLOR_ORDER = {"Cyan", "Coral", "Lime", "White"}
 Shared.SCHEMA = {
     highlights      = {kind="boolean", default=true,  label="Player highlights"},
     teammates       = {kind="boolean", default=true,  label="Highlight teammates"},
-    opponents       = {kind="boolean", default=true,  label="Highlight opponents (line of sight only)"},
+    opponents       = {kind="boolean", default=true,  label="Highlight opponents"},
+    opponentXray    = {kind="boolean", default=false, label="Opponents through walls (dev view)"},
     nameTags        = {kind="boolean", default=true,  label="Name and team tags"},
     distances       = {kind="boolean", default=true,  label="Distance in tags"},
     maxDistance     = {kind="number",  default=400, min=50, max=2000, step=25, unit=" st", label="Max tag distance"},

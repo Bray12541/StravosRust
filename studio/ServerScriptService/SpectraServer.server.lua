@@ -26,11 +26,13 @@ local CONFIG = {
     },
     AllowEveryoneInStudio = true,
     AimAssistDemoEnabled = true, -- master switch; client cannot enable it alone
+    OpponentXrayEnabled = true,  -- allows authorized players' "through walls" dev view
     DataStoreName = "SPECTRA_Config_v2",
     SaveCooldown = 6,
 }
 
 Workspace:SetAttribute(Shared.ASSIST_ATTRIBUTE, CONFIG.AimAssistDemoEnabled)
+Workspace:SetAttribute(Shared.XRAY_ATTRIBUTE, CONFIG.OpponentXrayEnabled)
 
 local remotes = ReplicatedStorage:FindFirstChild(Shared.REMOTE_FOLDER)
 if remotes then remotes:Destroy() end -- duplicate-instance prevention on script reload
