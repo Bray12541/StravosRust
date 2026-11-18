@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.22.2
+    SPECTRA / PHASE 1                         v1.23.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -24,11 +24,52 @@ if type(getgenv) == "function" then
     local ok, e = pcall(getgenv)
     if ok and type(e) == "table" then ENV = e end
 end
-if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
-    pcall(ENV.SPECTRA_PHASE1_UNLOAD)
+-- Clean up the previous instance before installing new event callbacks.
+-- Older builds returned nil even when unload succeeded, so only explicit
+-- failure/exception is fatal; leftover UI is checked below independently.
+local previousUnload = ENV.SPECTRA_PHASE1_UNLOAD
+if type(previousUnload) ~= "function" then
+    previousUnload = _G.SPECTRA_PHASE1_UNLOAD
+end
+if type(previousUnload) == "function" then
+    local ok,clean,reason = pcall(previousUnload)
+    if not ok or clean == false then
+        warn("[SPECTRA] Previous cleanup failed: "..tostring(ok and reason or clean)
+            ..". New instance blocked to avoid duplicate listeners.")
+        return
+    end
 end
 
-local VERSION = "1.22.2"
+-- If a prior environment lost its cleanup handle, do not stack another
+-- SPECTRA instance over an orphaned menu. The user can rejoin to reset it.
+local function oldGuiExists()
+    local containers={}
+    local pg=LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pg then containers[#containers+1]=pg end
+    local ok,core=pcall(function() return game:GetService("CoreGui") end)
+    if ok and core then containers[#containers+1]=core end
+    if type(gethui)=="function" then
+        local success,hui=pcall(gethui)
+        if success and typeof(hui)=="Instance" then
+            containers[#containers+1]=hui
+        end
+    end
+    for _,container in ipairs(containers) do
+        local safe,existing=pcall(function()
+            return container:FindFirstChild("SPECTRA_Phase1_UI")
+                or container:FindFirstChild("SPECTRA_Phase1_Overlay")
+        end)
+        if safe and existing then return true end
+    end
+    return false
+end
+if oldGuiExists() then
+    warn("[SPECTRA] Previous SPECTRA UI is still present after cleanup; "
+        .."new instance blocked. Rejoin the game before retrying.")
+    return
+end
+
+local VERSION = "1.23.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -2919,33 +2960,67 @@ local function exportReport()
 end
 
 local function shutdown()
-    if not alive then return end
-    log("INFO","Unloading SPECTRA and releasing UI/resources")
+    if not alive then return true end
+    -- Stop all frame work immediately, even if one cleanup step fails.
     alive=false
-    pcall(function() RunService:UnbindFromRenderStep(AIM_RENDER_BIND) end)
+    local errors={}
+    local function cleanup(label,callback)
+        local ok,err=pcall(callback)
+        if not ok then errors[#errors+1]=label..": "..tostring(err) end
+    end
+    cleanup("Unbind aim render step",function()
+        RunService:UnbindFromRenderStep(AIM_RENDER_BIND)
+    end)
     aimRmbHeld=false
-    Movement.restore()
-    SelfCalibration.clear("SPECTRA unloaded")
-    disableAimCorrection()
+    table.clear(aimKeyHeld)
+    cleanup("Restore movement",Movement.restore)
+    cleanup("Clear calibration",function() SelfCalibration.clear("SPECTRA unloaded") end)
+    cleanup("Stop camera correction",disableAimCorrection)
     if aimObservedCameraConnection then
-        pcall(function() aimObservedCameraConnection:Disconnect() end)
+        cleanup("Disconnect camera observer",function()
+            aimObservedCameraConnection:Disconnect()
+        end)
         aimObservedCameraConnection=nil
     end
     aimObservedCamera=nil
-    stopPicker(false)
-    for key in pairs(widgets) do destroyWidget(key) end
-    for _, conn in ipairs(connections) do pcall(function() conn:Disconnect() end) end
-    for _, conn in ipairs(watcherConnections) do pcall(function() conn:Disconnect() end) end
+    cleanup("Close picker",function() stopPicker(false) end)
+    for key,w in pairs(widgets) do
+        cleanup("Destroy ESP marker",function()
+            if w.highlight then w.highlight:Destroy() end
+            if w.root then w.root:Destroy() end
+        end)
+        widgets[key]=nil
+    end
+    for _,conn in ipairs(connections) do
+        cleanup("Disconnect event",function() conn:Disconnect() end)
+    end
+    for _,conn in ipairs(watcherConnections) do
+        cleanup("Disconnect folder watcher",function() conn:Disconnect() end)
+    end
     table.clear(watcherConnections)
     table.clear(connections)
-    calibratedEnemyGroup = nil
-    calibrationMode = "none"
-    if overlayGui then overlayGui:Destroy(); overlayGui=nil end
-    if menuGui then menuGui:Destroy(); menuGui=nil end
+    calibratedEnemyGroup=nil
+    calibrationMode="none"
+    if overlayGui then
+        cleanup("Destroy overlay",function() overlayGui:Destroy() end)
+        overlayGui=nil
+    end
+    if menuGui then
+        cleanup("Destroy menu",function() menuGui:Destroy() end)
+        menuGui=nil
+    end
     targets={}
-    if ENV.SPECTRA_PHASE1_UNLOAD == shutdown then ENV.SPECTRA_PHASE1_UNLOAD = nil end
+    if ENV.SPECTRA_PHASE1_UNLOAD==shutdown then ENV.SPECTRA_PHASE1_UNLOAD=nil end
+    if _G.SPECTRA_PHASE1_UNLOAD==shutdown then _G.SPECTRA_PHASE1_UNLOAD=nil end
+    if #errors>0 then
+        for _,err in ipairs(errors) do warn("[SPECTRA] Cleanup: "..err) end
+        return false,table.concat(errors,"; ")
+    end
+    print("[SPECTRA] Unloaded cleanly; connections released.")
+    return true
 end
 ENV.SPECTRA_PHASE1_UNLOAD = shutdown
+_G.SPECTRA_PHASE1_UNLOAD = shutdown
 
 -- UI startup is a separate function scope to avoid exhausting the
 -- main script's Luau local-variable slots. UI setup still executes now.
@@ -2974,7 +3049,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.22.2",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.23.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3613,6 +3688,7 @@ local function launchSpectraUI()
     end)
     connect(UserInputService.JumpRequest,Movement.jumpRequested)
     connect(RunService.Heartbeat,function(dt)
+        if not alive then return end
         local observeOK,observeError=pcall(Compat.sampleObservation,dt)
         if not observeOK then
             log("ERROR","Read-only motion observation failed: "..tostring(observeError))
@@ -3670,7 +3746,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.22.2 loaded. Enemy-only ESP default and explicit unknown-team diagnostic overlay")
+    log("INFO","SPECTRA Phase 1 v1.23.0 loaded. Safe re-execution and enemy-only ESP")
     log("INFO","Enemy-only ESP: unknown-team markers hidden by default. F6 or Select Enemy can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
@@ -3684,4 +3760,8 @@ local function launchSpectraUI()
     end
 end
 
-launchSpectraUI()
+local startOk,startError=pcall(launchSpectraUI)
+if not startOk then
+    warn("[SPECTRA] Startup failure: "..tostring(startError))
+    shutdown()
+end
