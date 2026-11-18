@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.27.0"
+local VERSION = "1.27.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -3687,7 +3687,15 @@ local function launchSpectraUI()
         resetInputDiagnostics()
         log("INFO","Camera & input counters reset")
     end)
-    groupLabel(debugPage,"EVENT LOG")
+    local logHeader=create("Frame",{Size=UDim2.new(1,-3,0,24),BackgroundTransparency=1},debugPage)
+    local logTitle=textLabel(logHeader,"EVENT LOG",10,C.muted,true)
+    logTitle.Size=UDim2.new(1,-112,1,0)
+    local copyLogButton=create("TextButton",{
+        Text="COPY FULL LOG",TextSize=10,Font=Enum.Font.GothamMedium,
+        TextColor3=C.white,BackgroundColor3=C.panel2,BorderSizePixel=0,
+        Size=UDim2.fromOffset(108,22),Position=UDim2.new(1,-108,0,1)
+    },logHeader)
+    round(copyLogButton,5)
     local logPanel=create("Frame",{Size=UDim2.new(1,-3,0,210),BackgroundColor3=C.panel,BorderSizePixel=0},debugPage)
     round(logPanel,6)
     local logScroll=create("ScrollingFrame",{Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-16,1,-16),BackgroundTransparency=1,
@@ -3695,6 +3703,42 @@ local function launchSpectraUI()
     logBox=create("TextBox",{BackgroundTransparency=1,ClearTextOnFocus=false,MultiLine=true,TextEditable=false,
         Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
         TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
+    local function copyFullEventLog()
+        local data=table.concat(logs,"\\n")
+        if data=="" then
+            log("WARN","Event log is empty")
+            copyLogButton.Text="LOG IS EMPTY"
+            return
+        end
+        if type(setclipboard)=="function" then
+            local ok,result=pcall(setclipboard,data)
+            if ok and result~=false then
+                log("INFO","Copied "..#logs.." stored Event Log entries")
+                copyLogButton.Text="COPIED!"
+                return
+            end
+        end
+        -- Clipboard APIs are not available in every executor. Select the
+        -- complete log in-place so the user can press Ctrl+C manually.
+        if logBox and logBox.Parent then
+            logBox.Text=data
+            logBox.TextEditable=true
+            logBox:CaptureFocus()
+            logBox.CursorPosition=#data+1
+            logBox.SelectionStart=1
+            copyLogButton.Text="PRESS CTRL+C"
+            return
+        end
+        print(data)
+        log("WARN","Clipboard unavailable; full Event Log printed to executor console")
+        copyLogButton.Text="CHECK CONSOLE"
+    end
+    connect(copyLogButton.MouseButton1Click,function()
+        safeCall("Copy full Event Log",copyFullEventLog)
+    end)
+    connect(logBox.FocusLost,function()
+        if logBox and logBox.Parent then logBox.TextEditable=false end
+    end)
     local inputRow=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
     local cmd=create("TextBox",{PlaceholderText="Type help, settings, get, set, toggle, tab...",Text="",ClearTextOnFocus=false,
         TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,
