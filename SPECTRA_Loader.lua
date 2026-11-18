@@ -2,7 +2,7 @@
 -- Live branch is used when it passes the version and compilation checks.
 -- Recovery never runs an old build that can display unidentified teammates.
 local BRANCH_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/21fa452a3e7d1430e0e77b3e16295c3a35cb5cca/SPECTRA.lua"
+local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/88bafd64bc8cc1d2701c7d3cedf6bfba9de7ace9/SPECTRA.lua"
 local MINIMUM_VERSION = "1.27.1"
 
 if type(loadstring) ~= "function" then
