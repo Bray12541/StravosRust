@@ -1,9 +1,9 @@
--- SPECTRA loader / verified baseline v1.17.0
--- Live branch is used when it is current AND actually compiles.
--- A stale or un-compilable response falls back to the pinned, tested build.
+-- SPECTRA loader / current baseline v1.24.0
+-- Live branch is used when it passes the version and compilation checks.
+-- Recovery never runs an old build that can display unidentified teammates.
 local BRANCH_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/b47319700c0c18ab3086f1de552b41fb73a60058/SPECTRA.lua"
-local MINIMUM_VERSION = "1.17.0"
+local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/1afbdc00dd711bd2b0bede46c05f7208adc0558a/SPECTRA.lua"
+local MINIMUM_VERSION = "1.24.0"
 
 if type(loadstring) ~= "function" then
     warn("[SPECTRA Loader] Your execution environment does not provide loadstring")
@@ -60,7 +60,7 @@ end
 local nonce=tostring(os.time()).."-"..tostring(math.random(100000,999999))
 local selected=getCompiledSource(BRANCH_URL.."?v="..nonce,"live branch")
 if not selected then
-    warn("[SPECTRA Loader] Switching to pinned, compiler-tested v"..MINIMUM_VERSION)
+    warn("[SPECTRA Loader] Live build unavailable; trying same-version pinned recovery v"..MINIMUM_VERSION)
     selected=getCompiledSource(PINNED_URL.."?v="..nonce,"pinned recovery")
 end
 if not selected then
