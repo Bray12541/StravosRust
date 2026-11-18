@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.23.0
+    SPECTRA / PHASE 1                         v1.24.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.23.0"
+local VERSION = "1.24.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -112,7 +112,6 @@ local COLOR_MODES = {
 }
 local state = {
     enabled = true,
-    espShowUnknown = false,
     distances = true,
     tracers = false,
     skeleton = true,
@@ -253,6 +252,10 @@ end
 local function getGroupRelation(model)
     local group = getTeamGroup(model)
     local root = Workspace:FindFirstChild("Players")
+    -- An explicitly identified local-player group always remains friendly,
+    -- even if manual calibration previously pointed at that group.
+    local localGroup=getTeamGroup(LocalPlayer.Character)
+    if localGroup and group and group==localGroup then return "ally" end
     if calibratedEnemyGroup then
         if not root or calibratedEnemyGroup.Parent ~= root then
             clearCalibration()
@@ -284,6 +287,22 @@ local function getGroupRelation(model)
     end
     return "unknown"
 end
+-- Use one conservative relation policy for ESP discovery, ESP rendering,
+-- persistent target lock and initial target acquisition.
+-- Any reliable ally evidence takes precedence over an enemy signal.
+local function classifyTarget(model,player)
+    if not model or model==LocalPlayer.Character
+        or (LocalPlayer.Character and model:IsDescendantOf(LocalPlayer.Character))
+        or player==LocalPlayer then
+        return "ally"
+    end
+    local playerRelation=player and getPlayerRelation(player) or "unknown"
+    local groupRelation=getGroupRelation(model)
+    if playerRelation=="ally" or groupRelation=="ally" then return "ally" end
+    if playerRelation=="enemy" or groupRelation=="enemy" then return "enemy" end
+    return "unknown"
+end
+
 local function markerColor()
     return COLOR_MODES[state.color] or C.accent
 end
@@ -516,65 +535,15 @@ local function autoResolveEnemyGroup()
         end
     end
 
-    -- In a two-player match, the sole remote character is safe to identify
-    -- without assuming group names. The local model must not also match.
-    local players=Players:GetPlayers()
-    if #players~=2 then
-        if calibrationMode=="automatic" then
-            calibratedEnemyGroup=nil
-            calibrationMode="none"
-        end
-        calibrationMessage="Auto: local team unconfirmed; unidentified players shown by ESP setting"
-        return
+    -- Never assume that the only other player is hostile. A duo may be
+    -- on the same team. Without an identified local group or public Team
+    -- membership, leave this session uncalibrated until F6/manual selection.
+    if calibrationMode=="automatic" then
+        calibratedEnemyGroup=nil
+        calibrationMode="none"
     end
-    local candidateGroup,count=nil,0
-    local foundLocalModel=false
-    local camera=Workspace.CurrentCamera
-    local queue={{root,0}}
-    local at,checked=1,0
-    while at<=#queue and checked<650 do
-        local item=queue[at]
-        at+=1
-        local node,depth=item[1],item[2]
-        for _,child in ipairs(node:GetChildren()) do
-            checked+=1
-            if checked>650 then break end
-            if child:IsA("Folder") and depth<3 then
-                queue[#queue+1]={child,depth+1}
-            elseif child:IsA("Model") then
-                local valid,modelRoot=validModel(child)
-                if valid then
-                    local owner=identifyPlayer(child)
-                    if owner==LocalPlayer then
-                        foundLocalModel=true
-                    else
-                        local group=getTeamGroup(child)
-                        local distance=camera and (camera.CFrame.Position-modelRoot.Position).Magnitude or 50
-                        if group and distance>5 then
-                            count+=1
-                            if count==1 then candidateGroup=group end
-                            if group~=candidateGroup then candidateGroup=nil end
-                        end
-                    end
-                end
-                if depth<2 then queue[#queue+1]={child,depth+1} end
-            end
-        end
-    end
-    if count==1 and candidateGroup and not foundLocalModel then
-        if calibrationMode~="automatic" or calibratedEnemyGroup~=candidateGroup then
-            calibratedEnemyGroup=candidateGroup
-            calibrationMode="automatic"
-            log("INFO","Auto identified lone opponent in 2-player session.")
-        end
-        calibrationMessage="Auto: lone opponent identified (2-player session)"
-    else
-        if calibrationMode=="automatic" then
-            calibratedEnemyGroup=nil
-            calibrationMode="none"
-        end
-        calibrationMessage=string.format("Auto: team unknown (eligible opponent rigs=%d)",count)
-    end
+    calibrationMessage="Auto: team unknown; confirm opponents via Team metadata or F6"
+
 end
 
 local function discoverTargets()
@@ -590,14 +559,7 @@ local function discoverTargets()
         local ok, root = validModel(model)
         if not ok then rejected += 1; return end
 
-        local playerRelation = player and getPlayerRelation(player) or "unknown"
-        local groupRelation = getGroupRelation(model)
-        local relation = "unknown"
-        if playerRelation == "ally" or groupRelation == "ally" then
-            relation = "ally"
-        elseif playerRelation == "enemy" or groupRelation == "enemy" then
-            relation = "enemy"
-        end
+        local relation=classifyTarget(model,player)
         if relation == "ally" then
             excluded += 1
             return
@@ -611,20 +573,17 @@ local function discoverTargets()
             if #samples < 4 then
                 samples[#samples+1] = model.Name .. " (" .. source .. ")"
             end
-            -- Never display an unclassified player as an enemy. Explicit
-            -- diagnostic opt-in may show everyone unknown, including allies.
-            -- Aimbot still requires positive enemy classification.
-            if not state.espShowUnknown then return end
+            -- Unknown is never eligible for ESP or aiming. Keep counters
+            -- for diagnostics without admitting the unclassified rig.
+            return
         end
 
         local segments = collectSkeletonSegments(model)
         if #segments > 0 then skeletonRigs += 1 end
-        if relation == "enemy" then
-            if player then verified += 1 else groupEnemies += 1 end
-        end
+        if player then verified += 1 else groupEnemies += 1 end
         nextTargets[#nextTargets+1] = {
             model=model, root=root, player=player,
-            source=source, bones=segments, relation=relation
+            source=source, bones=segments, relation="enemy"
         }
     end
     for _, player in ipairs(Players:GetPlayers()) do
@@ -1126,14 +1085,10 @@ local function render()
         local ok,err=pcall(function()
         local model = t.model
         local w = widgets[model]
-        local playerRelation = t.player and getPlayerRelation(t.player) or "unknown"
-        local groupRelation = getGroupRelation(model)
-        local isEnemy = (playerRelation == "enemy" or groupRelation == "enemy")
-            and playerRelation ~= "ally" and groupRelation ~= "ally"
-        local isUnknown = not isEnemy
-            and playerRelation ~= "ally" and groupRelation ~= "ally"
+        -- Re-check on every render frame so team switches immediately
+        -- suppress stale markers before the next discovery refresh.
         local shouldShow = model.Parent ~= nil and t.root and t.root.Parent ~= nil
-            and (isEnemy or (isUnknown and state.espShowUnknown))
+            and classifyTarget(model,t.player)=="enemy"
         local distance = 0
         if shouldShow then
             distance = (camera.CFrame.Position - t.root.Position).Magnitude
@@ -1146,14 +1101,11 @@ local function render()
         end
         if shouldShow then
             if not w then w = newWidget(model) end
-            local clr = isUnknown and C.orange or markerColor()
-            done += 1
+            local clr = markerColor()
             w.root.Visible = true
             w.distance.Visible = state.distances
             if state.distances then
-                w.distance.Text = isUnknown
-                    and string.format("? %d studs", math.floor(distance+0.5))
-                    or string.format("%d studs", math.floor(distance+0.5))
+                w.distance.Text=string.format("%d studs",math.floor(distance+0.5))
                 w.distance.Position = UDim2.fromOffset(left-30,bottom+3)
                 w.distance.Size = UDim2.fromOffset(right-left+60,16)
             end
@@ -1170,6 +1122,7 @@ local function render()
                 updateSkeleton(w,t,camera,clr)
             end
             updateHighlight(w,model,camera,clr)
+            done += 1
         else
             hideWidget(w)
         end
@@ -1417,11 +1370,9 @@ local function getPersistentAimTarget(camera)
     local root=trackedTarget.root
     local origin=camera.CFrame.Position
     if (root.Position-origin).Magnitude>MAX_DISTANCE then return nil,nil,nil end
-    local playerRelation=trackedTarget.player and getPlayerRelation(trackedTarget.player) or "unknown"
-    local groupRelation=getGroupRelation(lockedModel)
-    local isEnemy=(playerRelation=="enemy" or groupRelation=="enemy")
-        and playerRelation~="ally" and groupRelation~="ally"
-    if not isEnemy then return nil,nil,nil end
+    if classifyTarget(lockedModel,trackedTarget.player)~="enemy" then
+        return nil,nil,nil
+    end
     local humanoid=lockedModel:FindFirstChildOfClass("Humanoid")
     if humanoid and humanoid.Health<=0 then return nil,nil,nil end
 
@@ -1452,10 +1403,7 @@ local function chooseAimTarget(camera)
     for _,t in ipairs(targets) do
         local model,root=t.model,t.root
         if model and model.Parent and root and root.Parent then
-            local playerRelation=t.player and getPlayerRelation(t.player) or "unknown"
-            local groupRelation=getGroupRelation(model)
-            local enemy=(playerRelation=="enemy" or groupRelation=="enemy")
-                and playerRelation~="ally" and groupRelation~="ally"
+            local enemy=classifyTarget(model,t.player)=="enemy"
             local humanoid=model:FindFirstChildOfClass("Humanoid")
             if enemy and (not humanoid or humanoid.Health>0)
                 and (root.Position-camera.CFrame.Position).Magnitude <= MAX_DISTANCE then
@@ -2858,7 +2806,7 @@ local function inspectDataSources()
                             validCount += 1
                             local owner = identifyPlayer(child)
                             if owner then namedCount += 1 end
-                            local relation = owner and getPlayerRelation(owner) or getGroupRelation(child)
+                            local relation=classifyTarget(child,owner)
                             if relation == "enemy" then enemyCount += 1
                             elseif relation == "ally" then allyCount += 1
                             else unknownCount += 1 end
@@ -2900,7 +2848,7 @@ local function report()
         "Scans: "..tostring(stats.scans),
         "Options: skeleton="..tostring(state.skeleton)
             .." highlights="..tostring(state.highlights)
-            .." showUnknown="..tostring(state.espShowUnknown),
+            .." strictlyEnemyOnly=true",
         "Enemy-only tracking: "..tostring(stats.teammates).." allies excluded; unknown teams: "..tostring(stats.unknownTeams),
         "Group-matched enemy rigs: "..tostring(stats.enemyGroups).." (only when Roblox Team names match)",
         "Calibration: "..calibrationMessage,
@@ -3049,7 +2997,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.23.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.24.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3135,9 +3083,6 @@ local function launchSpectraUI()
             if key=="enabled" and not state[key] then
                 for _,w in pairs(widgets) do hideWidget(w) end
             elseif key=="enabled" and state[key] then
-                scanAccumulator=10
-            elseif key=="espShowUnknown" then
-                scanDirty=true
                 scanAccumulator=10
             end
             log("INFO",label.." = "..tostring(state[key]))
@@ -3369,7 +3314,6 @@ local function launchSpectraUI()
     header(espPage,"Player visuals","Configure your in-game overlay")
     groupLabel(espPage,"DISPLAY")
     toggle(espPage,"Enable ESP","Master switch for confirmed-enemy visual markers","enabled")
-    toggle(espPage,"Diagnostic: Show unknown teams","OFF recommended; shows all unclassified rigs including possible teammates (amber ?); never aimbot targets","espShowUnknown")
     toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
     toggle(espPage,"Tracers","Lines from the screen bottom toward players","tracers")
     toggle(espPage,"Skeleton","Real joints if available; posture-aware estimate otherwise","skeleton")
@@ -3381,7 +3325,7 @@ local function launchSpectraUI()
             log("WARN","ESP found no eligible character models. Open Debug for team/model diagnostics.")
         end
     end)
-    row(espPage,"Enemy-only filter","ESP shows confirmed enemies by default. If no enemies appear, calibrate the opposing team (F6 or Select Enemy).")
+    row(espPage,"Verified enemies only","Unidentified characters and teammates are always hidden. If no enemies appear, calibrate an opponent with F6.")
 
     -- Keep the menu fully inside the viewport, including after user dragging,
     -- display resolution changes, and inconsistent custom GUI parent sizes.
@@ -3746,8 +3690,8 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.23.0 loaded. Safe re-execution and enemy-only ESP")
-    log("INFO","Enemy-only ESP: unknown-team markers hidden by default. F6 or Select Enemy can calibrate opponents.")
+    log("INFO","SPECTRA Phase 1 v1.24.0 loaded. Verified-enemy-only ESP, consistent team filtering, safe reload")
+    log("INFO","Strict ESP filter active: unknown and allied rigs are never shown. F6 can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
         Compat.emit()
@@ -3756,7 +3700,7 @@ local function launchSpectraUI()
     safeCall("Initial scan",discoverTargets)
     log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
     if #targets==0 then
-        log("WARN","ESP found no confirmed enemies; use F6 or Select Enemy to calibrate your opponents. Diagnostic unknown-team display includes allies.")
+        log("WARN","ESP found no confirmed enemies; use F6 to calibrate an opponent or check native Team data.")
     end
 end
 
