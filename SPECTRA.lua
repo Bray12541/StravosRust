@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.22.1
+    SPECTRA / PHASE 1                         v1.22.2
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.22.1"
+local VERSION = "1.22.2"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -71,7 +71,7 @@ local COLOR_MODES = {
 }
 local state = {
     enabled = true,
-    espShowUnknown = true,
+    espShowUnknown = false,
     distances = true,
     tracers = false,
     skeleton = true,
@@ -570,8 +570,9 @@ local function discoverTargets()
             if #samples < 4 then
                 samples[#samples+1] = model.Name .. " (" .. source .. ")"
             end
-            -- Unknown is not enemy: ESP can draw it with a distinct color,
-            -- but the aimbot's strict enemy predicate continues to reject it.
+            -- Never display an unclassified player as an enemy. Explicit
+            -- diagnostic opt-in may show everyone unknown, including allies.
+            -- Aimbot still requires positive enemy classification.
             if not state.espShowUnknown then return end
         end
 
@@ -2973,7 +2974,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.22.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.22.2",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3292,8 +3293,8 @@ local function launchSpectraUI()
     local espPage=pages.ESP
     header(espPage,"Player visuals","Configure your in-game overlay")
     groupLabel(espPage,"DISPLAY")
-    toggle(espPage,"Enable ESP","Master switch for visual markers","enabled")
-    toggle(espPage,"Show unidentified rigs","Show amber markers for players whose teams cannot be verified; no aimbot targeting","espShowUnknown")
+    toggle(espPage,"Enable ESP","Master switch for confirmed-enemy visual markers","enabled")
+    toggle(espPage,"Diagnostic: Show unknown teams","OFF recommended; shows all unclassified rigs including possible teammates (amber ?); never aimbot targets","espShowUnknown")
     toggle(espPage,"Distance","Camera distance in Roblox studs","distances")
     toggle(espPage,"Tracers","Lines from the screen bottom toward players","tracers")
     toggle(espPage,"Skeleton","Real joints if available; posture-aware estimate otherwise","skeleton")
@@ -3305,7 +3306,7 @@ local function launchSpectraUI()
             log("WARN","ESP found no eligible character models. Open Debug for team/model diagnostics.")
         end
     end)
-    row(espPage,"Amber ? markers","Team is not confirmed. These are ESP-only; aiming stays enemy-only.")
+    row(espPage,"Enemy-only filter","ESP shows confirmed enemies by default. If no enemies appear, calibrate the opposing team (F6 or Select Enemy).")
 
     -- Keep the menu fully inside the viewport, including after user dragging,
     -- display resolution changes, and inconsistent custom GUI parent sizes.
@@ -3669,8 +3670,8 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.22.1 loaded. ESP classification recovery and per-target render isolation")
-    log("INFO","Two-team opponent classification enabled when local team is known. Unknown rigs display amber without aim targeting.")
+    log("INFO","SPECTRA Phase 1 v1.22.2 loaded. Enemy-only ESP default and explicit unknown-team diagnostic overlay")
+    log("INFO","Enemy-only ESP: unknown-team markers hidden by default. F6 or Select Enemy can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
         Compat.emit()
@@ -3679,7 +3680,7 @@ local function launchSpectraUI()
     safeCall("Initial scan",discoverTargets)
     log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
     if #targets==0 then
-        log("WARN","ESP currently has no eligible models; enable Show unidentified rigs or rescan after spawning.")
+        log("WARN","ESP found no confirmed enemies; use F6 or Select Enemy to calibrate your opponents. Diagnostic unknown-team display includes allies.")
     end
 end
 
