@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.26.1
+    SPECTRA / PHASE 1                         v1.27.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.26.1"
+local VERSION = "1.27.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -473,6 +473,69 @@ local function identifyPlayer(model)
     end
     return nil
 end
+-- Deterministic folder indices for manual debugging. Obfuscated model names
+-- and missing native Teams mean we must NOT guess which folder is hostile.
+local function getReplicatedGroups()
+    local root=Workspace:FindFirstChild("Players")
+    local result={}
+    if root then
+        for _,child in ipairs(root:GetChildren()) do
+            if child:IsA("Folder") then result[#result+1]=child end
+        end
+    end
+    table.sort(result,function(a,b)
+        return a.Name<b.Name
+    end)
+    return result
+end
+
+local function describeReplicatedGroup(group)
+    local stats={models=0,valid=0,allies=0,enemies=0,unknown=0,
+        closestPx=math.huge,closestStuds=math.huge,onScreen=0,checked=0}
+    local camera=Workspace.CurrentCamera
+    local queue={{group,0}}
+    local index=1
+    while index<=#queue and stats.checked<450 do
+        local node,depth=queue[index][1],queue[index][2]
+        index+=1
+        for _,child in ipairs(node:GetChildren()) do
+            stats.checked+=1
+            if stats.checked>450 then break end
+            if child:IsA("Model") then
+                stats.models+=1
+                local valid,root=validModel(child)
+                if valid then
+                    stats.valid+=1
+                    local owner=identifyPlayer(child)
+                    local relation=classifyTarget(child,owner)
+                    if relation=="ally" then stats.allies+=1
+                    elseif relation=="enemy" then stats.enemies+=1
+                    else stats.unknown+=1 end
+                    if camera and root then
+                        local position,inView=camera:WorldToViewportPoint(root.Position)
+                        if inView and position.Z>0.5 then
+                            stats.onScreen+=1
+                            local size=camera.ViewportSize
+                            local d=(
+                                Vector2.new(position.X,position.Y)
+                                -Vector2.new(size.X/2,size.Y/2)
+                            ).Magnitude
+                            if d<stats.closestPx then
+                                stats.closestPx=d
+                                stats.closestStuds=(root.Position-camera.CFrame.Position).Magnitude
+                            end
+                        end
+                    end
+                end
+                if depth<3 then queue[#queue+1]={child,depth+1} end
+            elseif child:IsA("Folder") and depth<3 then
+                queue[#queue+1]={child,depth+1}
+            end
+        end
+    end
+    return stats
+end
+
 -- Reject a manually selected enemy group if it contains any positively
 -- identified teammate or the local character. Unidentified players are not
 -- used as proof that a group is friendly or hostile.
@@ -776,7 +839,10 @@ local function watchPlayerFolder()
     scanAccumulator = 10
     if not root then return end
     local function invalidate(object)
-        if object:IsA("Model") or object:IsA("Folder") or object:IsA("BasePart") then
+        -- Part-level churn in large custom renderers can fire thousands of
+        -- events a minute. Models/folders trigger eager scans; the 2.2s
+        -- periodic scan still catches changes to an existing rig's parts.
+        if object:IsA("Model") or object:IsA("Folder") then
             groupEvents += 1
             scanDirty = true
         end
@@ -2990,7 +3056,12 @@ local function report()
         "Discovery: "..lastScanDetails,
         "Additional model scan: "..fallbackSummary,
         "Visible targets: "..tostring(stats.rendered),
-        "Identity status: "..(#targets>0 and "opposing-team models available" or "NO ENEMY MODELS: identities/team data missing or unavailable"),
+        "Identity status: "..(#targets>0 and "confirmed opposing-team targets available"
+            or ((stats.anonymous+stats.unknownTeams)>0
+                and ("VALID BUT UNCLASSIFIED MODELS: "
+                    ..tostring(stats.anonymous+stats.unknownTeams)
+                    .."; calibrate a known enemy group")
+                or "NO CONFIRMED ENEMY: models missing or identity/team data unavailable")),
         "FPS: "..string.format("%.0f",stats.fps).." / render target: 50 Hz (limited by FPS)",
         "Connections tracked: "..tostring(#connections),
         "Scans: "..tostring(stats.scans),
@@ -3145,7 +3216,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.26.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.27.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3853,7 +3924,8 @@ local function launchSpectraUI()
             log("INFO","settings | get KEY | set KEY VALUE | toggle KEY | resetsettings")
             log("INFO","tab Aimbot/ESP/Modifiers/Compat/Settings/Debug")
             log("INFO","diagnose (full snapshot to clipboard) | status | aimstatus")
-            log("INFO","probe | sources | targets | team | calibrate | pick | clearteam | rescan")
+            log("INFO","probe | sources | targets | team | groups | enemygroup N confirm")
+            log("INFO","calibrate | pick | clearteam | rescan")
             log("INFO","compat | compatmove | compatclear | copycompat")
             log("INFO","inputdiag | copyinput | resetinput | modprobe | modstatus")
             log("INFO","copyreport | copylogs | find TEXT | history")
@@ -3956,6 +4028,60 @@ local function launchSpectraUI()
         elseif verb=="team" then
             log("INFO","Team calibration: "..calibrationMessage
                 .." | mode="..calibrationMode.." | events="..groupEvents)
+            log("INFO","Type groups to see the client-visible replicated folders.")
+        elseif verb=="groups" then
+            local groups=getReplicatedGroups()
+            log("INFO","-- REPLICATED CHARACTER GROUPS: "..#groups
+                .." (indices sorted by folder name) --")
+            for i,group in ipairs(groups) do
+                local g=describeReplicatedGroup(group)
+                local nearest=g.closestPx<math.huge
+                    and string.format("%.0f px / %.0f studs",g.closestPx,g.closestStuds)
+                    or "none in viewport"
+                log("INFO",string.format("%d) %s | valid=%d/%d unknown=%d"
+                    .." on-screen=%d nearest-crosshair=%s%s",
+                    i,group.Name,g.valid,g.models,g.unknown,g.onScreen,
+                    nearest,group==calibratedEnemyGroup and " [SELECTED]" or ""))
+            end
+            log("WARN","Folders are NOT proven teams. Aim at a visible enemy first;"
+                .." select only a group you have independently verified.")
+            log("INFO","Use enemygroup <index> confirm; clearteam reverses selection.")
+        elseif verb=="enemygroup" then
+            local indexText,confirmation=tail:match("^(%d+)%s*(%a*)$")
+            local number=tonumber(indexText)
+            local groups=getReplicatedGroups()
+            local group=number and groups[number] or nil
+            if not group then
+                log("WARN","Usage: groups, then enemygroup <index> confirm")
+                return
+            end
+            local valid=describeReplicatedGroup(group)
+            if valid.valid<1 then
+                log("WARN","Group "..number.." contains no valid replicated rigs")
+                return
+            end
+            if confirmation~="confirm" then
+                log("WARN","Group "..number.." ('"..group.Name.."') has "
+                    ..valid.valid.." valid rigs; identity unverified.")
+                log("WARN","If you visually confirmed a visible ENEMY belongs to it,"
+                    .." enter enemygroup "..number.." confirm.")
+                return
+            end
+            local allowed,reason=enemyGroupAllowed(group)
+            if not allowed then
+                log("WARN","Enemy group selection rejected: "..tostring(reason))
+                return
+            end
+            calibratedEnemyGroup=group
+            calibrationMode="manual"
+            calibrationMessage="Manually selected replicated group "..number
+                .." ('"..group.Name.."') - enemy identity user-confirmed"
+            scanDirty=true
+            scanAccumulator=10
+            discoverTargets()
+            log("INFO","Selected group "..number.." as enemy: "
+                ..#targets.." targets | "..lastScanDetails)
+            log("WARN","If any teammates are marked, use clearteam immediately.")
         elseif verb=="calibrate" then calibrateEnemyFromCrosshair()
         elseif verb=="pick" then beginPicker()
         elseif verb=="clearteam" then
@@ -4047,7 +4173,8 @@ local function launchSpectraUI()
     groupLabel(debugPage,"CONSOLE QUICK REFERENCE")
     row(debugPage,"Menu settings","settings · get aimFovRadius · set fov 200 · toggle skeleton")
     row(debugPage,"Navigation","tab ESP · tab Aimbot · tab Settings · tab Debug")
-    row(debugPage,"Troubleshooting","diagnose · probe · sources · aimstatus · copyreport")
+    row(debugPage,"Troubleshooting","diagnose · groups · enemygroup N confirm · clearteam")
+    row(debugPage,"Team data unavailable","With 0 native Teams, only a visually confirmed group can be treated as enemies.")
     action(debugPage,"Run full diagnostics & copy bundle",function()
         runCommand("diagnose")
     end)
@@ -4129,7 +4256,7 @@ local function launchSpectraUI()
         scanAccumulator += dt
         renderAccumulator += dt
         statAccumulator += dt
-        if scanAccumulator >= 2.2 or (scanDirty and scanAccumulator >= 0.2) then
+        if scanAccumulator >= 2.2 or (scanDirty and scanAccumulator >= 0.75) then
             scanAccumulator = 0
             scanDirty = false
             safeCall("Discover",discoverTargets)
@@ -4223,7 +4350,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.26.1 loaded. One-command diagnostic bundle and verified-enemy ESP filtering")
+    log("INFO","SPECTRA Phase 1 v1.27.0 loaded. Manual group calibration and bounded discovery diagnostics")
     log("INFO","Strict ESP filter active: unknown and allied rigs are never shown. F6 can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
