@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.24.1
+    SPECTRA / PHASE 1                         v1.25.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.24.1"
+local VERSION = "1.25.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -78,6 +78,11 @@ local logs = {}
 local targets = {}
 local lastSource = "Not scanned"
 local lastScanDetails = "Not scanned"
+-- Alternate public Workspace discovery is cached and rate-limited. Never
+-- assume an unknown humanoid/model belongs to an opposing player.
+local fallbackModels={}
+local fallbackNextScan=0
+local fallbackSummary="not scanned"
 local stats = {discovered=0, matched=0, anonymous=0, enemyGroups=0, unknownTeams=0, teammates=0, skeletonRigs=0, approxSkeletons=0, wideSkeletons=0, rejected=0, rendered=0, fps=0, scans=0, drawn=0, sample=0, frameMs=0}
 local overlayGui, menuGui, overlayLayer, window, statusText, logBox, debugSummary, menu, aimFovFrame
 local focusedTab = "ESP"
@@ -654,6 +659,72 @@ local function discoverTargets()
     else
         lastSource = "Workspace.Players absent"
     end
+    -- Non-standard character renderers can place genuinely replicated
+    -- Player-owned models outside Workspace.Players. Search only a bounded
+    -- set of plausible public containers, every 6 seconds, and admit only
+    -- models that can be explicitly matched to a Roblox Player. This does
+    -- not read private replication stores or infer anonymous coordinates.
+    if os.clock()>=fallbackNextScan then
+        fallbackNextScan=os.clock()+6
+        table.clear(fallbackModels)
+        local queue,queued={},{}
+        local function enqueue(node,depth)
+            if not node or queued[node] then return end
+            queued[node]=true
+            queue[#queue+1]={node,depth}
+        end
+        local rootNames={"Characters","PlayerCharacters","PlayerModels",
+            "Actors","Entities","Client","Players","Render","Ignore",
+            "ReplicatedCharacters","Game"}
+        for _,name in ipairs(rootNames) do
+            local container=Workspace:FindFirstChild(name)
+            if container and container:IsA("Instance") then enqueue(container,0) end
+        end
+        -- Also inspect a bounded number of direct Workspace models without
+        -- recursively traversing gigantic terrain or map structures.
+        local directChecked=0
+        for _,child in ipairs(Workspace:GetChildren()) do
+            directChecked+=1
+            if directChecked>350 then break end
+            if child:IsA("Model") then enqueue(child,0) end
+        end
+        local at,visited,models,owned=1,0,0,0
+        while at<=#queue and visited<1250 and owned<72 do
+            local item=queue[at]
+            at+=1
+            local node,depth=item[1],item[2]
+            visited+=1
+            if node:IsA("Model") then
+                models+=1
+                local ok,owner=pcall(identifyPlayer,node)
+                if ok and owner and owner~=LocalPlayer then
+                    local valid=validModel(node)
+                    if valid then
+                        owned+=1
+                        fallbackModels[#fallbackModels+1]=node
+                    end
+                end
+            end
+            if depth<3 and (node:IsA("Model") or node:IsA("Folder")) then
+                for _,child in ipairs(node:GetChildren()) do
+                    if child:IsA("Model") or child:IsA("Folder") then
+                        enqueue(child,depth+1)
+                    end
+                end
+            end
+        end
+        fallbackSummary=string.format("public fallback: %d nodes / %d models / %d player-owned (limit 1250)",
+            visited,models,owned)
+    end
+    for _,model in ipairs(fallbackModels) do
+        if model and model.Parent and not seen[model] then
+            local ok,owner=pcall(identifyPlayer,model)
+            if ok and owner and owner~=LocalPlayer then
+                admit(model,owner,"Other Workspace container")
+            end
+        end
+    end
+
     local aliveKeys = {}
     for _, target in ipairs(nextTargets) do aliveKeys[target.model] = true end
     for key in pairs(widgets) do if not aliveKeys[key] then destroyWidget(key) end end
@@ -671,6 +742,16 @@ local function discoverTargets()
         "targets=%d verified=%d enemy-group=%d unidentified=%d unknown-team=%d allies=%d rigged=%d rejected=%d checked=%d players=%d",
         #targets, verified, groupEnemies, unverified, unknownTeam, excluded, skeletonRigs, rejected, checked, #Players:GetPlayers()
     )
+    lastScanDetails ..= " | "..fallbackSummary
+    if #targets == 0 then
+        if checked==0 and #fallbackModels==0 then
+            lastScanDetails ..= " | no public player models in scanned paths"
+        elseif unverified+unknownTeam>0 then
+            lastScanDetails ..= " | public models exist but opposing team unverified"
+        else
+            lastScanDetails ..= " | no confirmed enemy positions available"
+        end
+    end
     if #targets == 0 and #samples > 0 then
         lastScanDetails ..= " samples: " .. table.concat(samples, ", ")
     end
@@ -2566,8 +2647,12 @@ local Compat=(function()
                 end
             end
         end
-        line(string.format("Replicated model search: %d visited / %d models / %d owned / %d anonymous",
+        line(string.format("Replicated model search (Workspace.Players only): %d visited / %d models / %d owned / %d anonymous",
             nodeCount,modelCount,ownedCount,anonymousCount))
+        line("ESP alternate public-Workspace scan: "..fallbackSummary)
+        if modelCount==0 and #fallbackModels==0 then
+            line("ESP position data: no candidate character Models found in supported public paths")
+        end
         if not candidate then
             local localNamed=Workspace:FindFirstChild(LocalPlayer.Name)
             if localNamed and localNamed:IsA("Model")
@@ -2810,7 +2895,8 @@ end
 -- Bounded source audit, run only when a report is requested.
 -- Does not track or render objects: it exposes why candidate models are excluded.
 local function inspectDataSources()
-    local lines = {"-- REPLICATION / TEAM PROBE --"}
+    local lines = {"-- REPLICATION / TEAM PROBE --",
+        "ESP fallback: "..fallbackSummary}
     local all = Players:GetPlayers()
     local counts = {enemy=0, ally=0, unknown=0, characters=0}
     local function teamLabel(team)
@@ -2827,6 +2913,9 @@ local function inspectDataSources()
         local relation = getPlayerRelation(p)
         counts[relation] += 1
         if p.Character and p.Character.Parent then counts.characters += 1 end
+        lines[#lines+1] = "Player "..p.Name.." | relation="..relation
+            .." | Team="..teamLabel(p.Team)
+            .." | Character="..tostring(p.Character and p.Character.Parent~=nil or false)
     end
     lines[#lines+1] = string.format(
         "Player relations: enemies=%d allies=%d unknown=%d | standard characters=%d/%d",
@@ -2894,6 +2983,7 @@ local function report()
         "CurrentCamera: "..tostring(Workspace.CurrentCamera~=nil),
         "Folder: "..lastSource,
         "Discovery: "..lastScanDetails,
+        "Additional model scan: "..fallbackSummary,
         "Visible targets: "..tostring(stats.rendered),
         "Identity status: "..(#targets>0 and "opposing-team models available" or "NO ENEMY MODELS: identities/team data missing or unavailable"),
         "FPS: "..string.format("%.0f",stats.fps).." / render target: 50 Hz (limited by FPS)",
@@ -3050,7 +3140,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.24.1",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.25.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3372,6 +3462,7 @@ local function launchSpectraUI()
     toggle(espPage,"Skeleton","Real joints if available; posture-aware estimate otherwise","skeleton")
     toggle(espPage,"3D highlight","Client-side character highlighting","highlights")
     action(espPage,"Rescan ESP characters",function()
+        fallbackNextScan=0
         discoverTargets()
         log("INFO","ESP rescan: "..lastScanDetails)
         if #targets==0 then
@@ -3743,7 +3834,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.24.1 loaded. Verified enemy filtering, ally-safe team calibration and safe reload")
+    log("INFO","SPECTRA Phase 1 v1.25.0 loaded. Bounded public Workspace model discovery and detailed ESP diagnostics")
     log("INFO","Strict ESP filter active: unknown and allied rigs are never shown. F6 can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
@@ -3753,7 +3844,8 @@ local function launchSpectraUI()
     safeCall("Initial scan",discoverTargets)
     log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
     if #targets==0 then
-        log("WARN","ESP found no confirmed enemies; use F6 to calibrate an opponent or check native Team data.")
+        log("WARN","ESP has no confirmed enemy positions. "..fallbackSummary)
+        log("WARN","If Roblox exposes no valid player-owned character models, this client-only script cannot draw reliable ESP.")
     end
 end
 
