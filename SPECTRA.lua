@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.22.0
+    SPECTRA / PHASE 1                         v1.22.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -28,7 +28,7 @@ if type(ENV.SPECTRA_PHASE1_UNLOAD) == "function" then
     pcall(ENV.SPECTRA_PHASE1_UNLOAD)
 end
 
-local VERSION = "1.22.0"
+local VERSION = "1.22.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -437,15 +437,28 @@ local function autoResolveEnemyGroup()
         if ownGroup~=groups[1] and ownGroup~=groups[2] then
             ownGroup=nil
             for _,group in ipairs(groups) do
-                local examined=0
-                for _,descendant in ipairs(group:GetDescendants()) do
-                    examined+=1
-                    if examined>250 then break end
-                    if descendant:IsA("Model") and validModel(descendant)
-                        and identifyPlayer(descendant)==LocalPlayer then
-                        ownGroup=group
-                        break
+                -- Bounded BFS avoids materializing every descendant in a
+                -- large game replication folder each discovery interval.
+                local queue={{group,0}}
+                local at,examined=1,0
+                while at<=#queue and examined<350 do
+                    local item=queue[at]
+                    at+=1
+                    local node,depth=item[1],item[2]
+                    for _,child in ipairs(node:GetChildren()) do
+                        examined+=1
+                        if examined>350 then break end
+                        if child:IsA("Model") and validModel(child)
+                            and identifyPlayer(child)==LocalPlayer then
+                            ownGroup=group
+                            break
+                        end
+                        if (child:IsA("Model") or child:IsA("Folder"))
+                            and depth<3 then
+                            queue[#queue+1]={child,depth+1}
+                        end
                     end
+                    if ownGroup then break end
                 end
                 if ownGroup then break end
             end
@@ -1067,6 +1080,8 @@ local function render()
     local approximateCount=0
     local wideCount=0
     for _, t in ipairs(targets) do
+        -- A despawning or malformed model cannot suppress every ESP marker.
+        local ok,err=pcall(function()
         local model = t.model
         local w = widgets[model]
         local playerRelation = t.player and getPlayerRelation(t.player) or "unknown"
@@ -1115,6 +1130,14 @@ local function render()
             updateHighlight(w,model,camera,clr)
         else
             hideWidget(w)
+        end
+        end)
+        if not ok then
+            stats.espRenderErrors=(stats.espRenderErrors or 0)+1
+            hideWidget(widgets[t.model])
+            if stats.espRenderErrors<=4 then
+                log("ERROR","ESP model render failed: "..tostring(err))
+            end
         end
     end
     stats.rendered = done
@@ -2950,7 +2973,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.22.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.22.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3646,7 +3669,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.22.0 loaded. ESP recovery for unidentified teams and input-first aim tracking")
+    log("INFO","SPECTRA Phase 1 v1.22.1 loaded. ESP classification recovery and per-target render isolation")
     log("INFO","Two-team opponent classification enabled when local team is known. Unknown rigs display amber without aim targeting.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
@@ -3655,6 +3678,9 @@ local function launchSpectraUI()
     end)
     safeCall("Initial scan",discoverTargets)
     log("INFO","Initial discovery: "..lastSource.." / "..lastScanDetails)
+    if #targets==0 then
+        log("WARN","ESP currently has no eligible models; enable Show unidentified rigs or rescan after spawning.")
+    end
 end
 
 launchSpectraUI()
