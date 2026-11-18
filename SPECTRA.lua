@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.24.0
+    SPECTRA / PHASE 1                         v1.24.1
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.24.0"
+local VERSION = "1.24.1"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -468,6 +468,38 @@ local function identifyPlayer(model)
     end
     return nil
 end
+-- Reject a manually selected enemy group if it contains any positively
+-- identified teammate or the local character. Unidentified players are not
+-- used as proof that a group is friendly or hostile.
+local function enemyGroupAllowed(group)
+    if not group or not group.Parent then
+        return false,"No valid team group selected"
+    end
+    if getTeamGroup(LocalPlayer.Character)==group then
+        return false,"Selected group contains your own character"
+    end
+    local queue={{group,0}}
+    local at,checked=1,0
+    while at<=#queue and checked<350 do
+        local node,depth=queue[at][1],queue[at][2]
+        at+=1
+        for _,child in ipairs(node:GetChildren()) do
+            checked+=1
+            if checked>350 then break end
+            if child:IsA("Model") then
+                local owner=identifyPlayer(child)
+                if owner and getPlayerRelation(owner)=="ally" then
+                    return false,"Selected group contains a confirmed teammate ("..owner.Name..")"
+                end
+                if depth<3 then queue[#queue+1]={child,depth+1} end
+            elseif child:IsA("Folder") and depth<3 then
+                queue[#queue+1]={child,depth+1}
+            end
+        end
+    end
+    return true,nil
+end
+
 -- Automatic identification without F6 is safe only when one remote
 -- character exists in a two-player server. Larger games expose no team
 -- identities, so this never guesses which of two groups is hostile.
@@ -525,6 +557,15 @@ local function autoResolveEnemyGroup()
         end
         if ownGroup then
             local opposing=ownGroup==groups[1] and groups[2] or groups[1]
+            local allowed,reason=enemyGroupAllowed(opposing)
+            if not allowed then
+                if calibrationMode=="automatic" then
+                    calibratedEnemyGroup=nil
+                    calibrationMode="none"
+                end
+                calibrationMessage="Auto team check rejected: "..tostring(reason)
+                return
+            end
             if calibratedEnemyGroup~=opposing or calibrationMode~="automatic" then
                 calibratedEnemyGroup=opposing
                 calibrationMode="automatic"
@@ -754,6 +795,12 @@ local function calibrateEnemyFromCrosshair()
         log("WARN","Could not identify a unique visible player under the crosshair. Aim closer at an enemy torso and press F6.")
         return
     end
+    local allowed,reason=enemyGroupAllowed(group)
+    if not allowed then
+        calibrationMessage="Enemy calibration rejected: "..tostring(reason)
+        log("WARN",calibrationMessage)
+        return
+    end
     calibratedEnemyGroup = group
     calibrationMode = "manual"
     calibrationMessage = "Enemy group selected (F6); other groups excluded"
@@ -875,6 +922,12 @@ local function calibrateAtPixel(point)
     end
     if not selected then
         calibrationMessage="No distinct player rig at click - try clicking their torso"
+        log("WARN",calibrationMessage)
+        return
+    end
+    local allowed,reason=enemyGroupAllowed(selected)
+    if not allowed then
+        calibrationMessage="Enemy selection rejected: "..tostring(reason)
         log("WARN",calibrationMessage)
         return
     end
@@ -2997,7 +3050,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.24.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.24.1",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3690,7 +3743,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.24.0 loaded. Verified-enemy-only ESP, consistent team filtering, safe reload")
+    log("INFO","SPECTRA Phase 1 v1.24.1 loaded. Verified enemy filtering, ally-safe team calibration and safe reload")
     log("INFO","Strict ESP filter active: unknown and allied rigs are never shown. F6 can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
