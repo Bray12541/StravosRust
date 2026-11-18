@@ -669,7 +669,9 @@ local function discoverTargets()
         table.clear(fallbackModels)
         local queue,queued={},{}
         local function enqueue(node,depth)
-            if not node or queued[node] then return end
+            -- Bound both traversal and queue growth. Large map hierarchies
+            -- must never allocate an unbounded list of candidate models.
+            if not node or queued[node] or #queue>=1600 then return end
             queued[node]=true
             queue[#queue+1]={node,depth}
         end
@@ -706,7 +708,10 @@ local function discoverTargets()
                 end
             end
             if depth<3 and (node:IsA("Model") or node:IsA("Folder")) then
+                local childrenChecked=0
                 for _,child in ipairs(node:GetChildren()) do
+                    childrenChecked+=1
+                    if childrenChecked>220 or #queue>=1600 then break end
                     if child:IsA("Model") or child:IsA("Folder") then
                         enqueue(child,depth+1)
                     end
