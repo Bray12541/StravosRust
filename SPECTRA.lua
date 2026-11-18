@@ -1,5 +1,5 @@
 --[[
-    SPECTRA / PHASE 1                         v1.25.0
+    SPECTRA / PHASE 1                         v1.26.0
     Standalone client-side Luau player-visualization overlay.
     No loadstring, getgc, memory scans, game hooks or remote scripts.
     RSHIFT: hide/show menu | F8: debug | HOME: center | Unload: header or Ctrl+End
@@ -69,7 +69,7 @@ if oldGuiExists() then
     return
 end
 
-local VERSION = "1.25.0"
+local VERSION = "1.26.0"
 local alive = true
 local connections = {}
 local tracked = {}
@@ -3145,7 +3145,7 @@ local function launchSpectraUI()
     local top=create("Frame",{Size=UDim2.new(1,0,0,53),BackgroundColor3=C.base,BorderSizePixel=0},window)
     local title=textLabel(top,"SPECTRA",16,C.white,true)
     title.Position=UDim2.fromOffset(21,11); title.Size=UDim2.fromOffset(130,22)
-    local sub=textLabel(top,"PLAYER VISUALS  /  1.25.0",10,C.muted)
+    local sub=textLabel(top,"PLAYER VISUALS  /  1.26.0",10,C.muted)
     sub.Position=UDim2.fromOffset(137,12); sub.Size=UDim2.fromOffset(180,22)
     -- Hide only changes menu visibility; ESP keeps running.
     local hideButton=create("TextButton",{Text="Hide",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.muted,
@@ -3299,6 +3299,8 @@ local function launchSpectraUI()
         connect(UserInputService.InputEnded,function(input)
             if input.UserInputType==Enum.UserInputType.MouseButton1 then active=false end
         end)
+        -- Refresh the slider fill and label when changed from console.
+        toggleRefreshers[#toggleRefreshers+1]=refresh
         refresh()
     end
 
@@ -3322,6 +3324,11 @@ local function launchSpectraUI()
         aimKeyCapture=true
         aimKeyButton.Text="Press keyboard key or RMB (Esc cancels)"
     end)
+    toggleRefreshers[#toggleRefreshers+1]=function()
+        if not aimKeyCapture then
+            aimKeyButton.Text="Aim Key: "..state.aimKey.." (click to rebind)"
+        end
+    end
     action(aimPage,"Aim Key: Always active",function()
         applyAimKey("Always")
     end)
@@ -3362,6 +3369,9 @@ local function launchSpectraUI()
         aimPointButton.Text="Target Bone: "..state.aimPoint
         log("INFO","Aimbot target bone: "..state.aimPoint)
     end)
+    toggleRefreshers[#toggleRefreshers+1]=function()
+        aimPointButton.Text="Target Bone: "..state.aimPoint
+    end
     groupLabel(aimPage,"CONTROL")
     settingSlider(aimPage,"Aim FOV","Target selection radius around crosshair","aimFovRadius",40,400,10," px")
     local aimStyleButton
@@ -3370,6 +3380,9 @@ local function launchSpectraUI()
         aimStyleButton.Text="Aim style: "..state.aimStyle
         log("INFO","Aimbot style: "..state.aimStyle)
     end)
+    toggleRefreshers[#toggleRefreshers+1]=function()
+        aimStyleButton.Text="Aim style: "..state.aimStyle
+    end
     settingSlider(aimPage,"Snap strength","Fast mouse correction; tune to in-game sensitivity","aimSnapStrength",40,200,10,"%")
     settingSlider(aimPage,"Lock pull strength","Mouse-input correction toward a locked target (50% subtle, 250% aggressive)","aimPullStrength",50,250,10,"%")
     settingSlider(aimPage,"Smoothness","Only affects Smooth style (1 fast, 20 gradual)","aimSmoothing",1,20,1,"")
@@ -3385,6 +3398,9 @@ local function launchSpectraUI()
         aimMethodButton.Text="Aim method: "..state.aimMethod
         log("INFO","Aimbot method: "..state.aimMethod)
     end)
+    toggleRefreshers[#toggleRefreshers+1]=function()
+        aimMethodButton.Text="Aim method: "..state.aimMethod
+    end
     row(aimPage,"Lock behavior","First target must be inside FOV. A valid locked enemy stays selected outside FOV; it releases if lost, defeated or filtered.")
     row(aimPage,"Cover behavior","With Visibility Check off, a locked target can remain selected behind geometry. Bullets still obey game collisions.")
     row(aimPage,"Runtime compatibility","Auto prefers mouse movement for camera AND weapon; tune Lock pull strength if your gun lags or jitters. Stabilized only adjusts camera.")
@@ -3540,6 +3556,9 @@ local function launchSpectraUI()
         colorButton.Text="Marker color: "..state.color.."  (click to cycle)"
         log("INFO","Marker color: "..state.color)
     end)
+    toggleRefreshers[#toggleRefreshers+1]=function()
+        colorButton.Text="Marker color: "..state.color.."  (click to cycle)"
+    end
     groupLabel(settingsPage,"KEYBINDS")
     local keyText=row(settingsPage,"Right Shift","Show or hide the menu")
     local debugText=row(settingsPage,"F8","Open the diagnostic console")
@@ -3555,7 +3574,7 @@ local function launchSpectraUI()
         Size=UDim2.new(1,-10,0,64),TextWrapped=true,BackgroundTransparency=1,Font=Enum.Font.Gotham,TextColor3=C.muted,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextSize=11},settingsPage)
 
     local debugPage=pages.Debug
-    header(debugPage,"Diagnostics","Read-only inspection  ·  Logs limited to 140 entries")
+    header(debugPage,"Command Center","Inspect, configure and troubleshoot SPECTRA · logs limited to 140 entries")
     debugSummary=textLabel(debugPage,"Not scanned",11,C.muted)
     debugSummary.Size=UDim2.new(1,-3,0,39)
     debugSummary.TextWrapped=true
@@ -3606,69 +3625,373 @@ local function launchSpectraUI()
         Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
         TextWrapped=true,Text="",Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y,BorderSizePixel=0},logScroll)
     local inputRow=create("Frame",{Size=UDim2.new(1,-3,0,32),BackgroundTransparency=1},debugPage)
-    local cmd=create("TextBox",{PlaceholderText="compat, copycompat, modstatus, help, unload",Text="",ClearTextOnFocus=false,
+    local cmd=create("TextBox",{PlaceholderText="Type help, settings, get, set, toggle, tab...",Text="",ClearTextOnFocus=false,
         TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Code,TextSize=11,TextColor3=C.white,
         PlaceholderColor3=C.muted,BackgroundColor3=C.panel,Size=UDim2.new(1,-76,1,0),BorderSizePixel=0},inputRow)
     round(cmd,5);create("UIPadding",{PaddingLeft=UDim.new(0,9)},cmd)
     local run=create("TextButton",{Text="Run",Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=C.white,
         BackgroundColor3=C.panel2,Size=UDim2.fromOffset(68,32),Position=UDim2.new(1,-68,0,0),BorderSizePixel=0},inputRow)
     round(run,5)
+    -- The console shares the exact state table used by every visible menu
+    -- control. Values are validated; this is NOT a general Luau evaluator.
+    local consoleController=(function()
+        local controlSchema={
+            -- ESP
+            enabled={"bool","ESP enabled"},
+            distances={"bool","ESP distance"},
+            tracers={"bool","ESP tracers"},
+            skeleton={"bool","ESP skeleton"},
+            highlights={"bool","ESP highlight"},
+            -- Aiming
+            aimEnabled={"bool","Aimbot enabled"},
+            aimFovVisible={"bool","FOV circle"},
+            aimVisibleOnly={"bool","Visibility check"},
+            aimSticky={"bool","Sticky targets"},
+            aimLock={"bool","Persistent lock"},
+            aimFovRadius={"num","Aim FOV",40,400,10},
+            aimSmoothing={"num","Smoothness",1,20,1},
+            aimSnapStrength={"num","Snap strength",40,200,10},
+            aimPullStrength={"num","Lock pull strength",50,250,10},
+            aimStyle={"enum","Aim style",{"Snap","Smooth"}},
+            aimPoint={"enum","Target bone",{"Head","Chest","Nearest"}},
+            aimMethod={"enum","Aim method",{"Auto","Mouse","Camera","Stabilized"}},
+            aimKey={"key","Aim activation key"},
+            -- Modifiers
+            speedHack={"bool","Speed modifier"},
+            speedValue={"num","Movement speed",16,50,2},
+            infiniteJump={"bool","Infinite jump"},
+            noFallDamage={"bool","No fall damage"},
+            antiAim={"bool","Anti aim visual"},
+            -- Appearance
+            color={"enum","ESP marker color",{"Cyan","Coral","Lime","White"}}
+        }
+        local aliases={
+            esp="enabled",aimbot="aimEnabled",fov="aimFovRadius",
+            aimfov="aimFovRadius",aimkey="aimKey",bone="aimPoint",
+            target="aimPoint",method="aimMethod",style="aimStyle",
+            pull="aimPullStrength",snap="aimSnapStrength",
+            smooth="aimSmoothing",visibility="aimVisibleOnly",
+            sticky="aimSticky",lock="aimLock",distance="distances",
+            highlight="highlights",speed="speedValue"
+        }
+        local defaults={}
+        local keys={}
+        for key in pairs(controlSchema) do
+            keys[#keys+1]=key
+            defaults[key]=state[key]
+        end
+        table.sort(keys)
+        local function canonical(raw)
+            local needle=tostring(raw or ""):lower():gsub("[^%w]","")
+            for key in pairs(controlSchema) do
+                if key:lower()==needle then return key end
+            end
+            return aliases[needle]
+        end
+        local function parseBool(text)
+            if text=="on" or text=="true" or text=="1" or text=="yes" then return true end
+            if text=="off" or text=="false" or text=="0" or text=="no" then return false end
+            return nil
+        end
+        local function parseKey(text)
+            local canonicalText=text:lower():gsub("%s+","")
+            if canonicalText=="always" then return "Always" end
+            if canonicalText=="rightmouse" or canonicalText=="rmb" then return "Right Mouse" end
+            if canonicalText=="leftalt" then return "Left Alt" end
+            for _,item in ipairs(Enum.KeyCode:GetEnumItems()) do
+                if item.Name:lower()==canonicalText and item~=Enum.KeyCode.Unknown
+                    and item~=Enum.KeyCode.RightShift
+                    and item~=Enum.KeyCode.F8 and item~=Enum.KeyCode.Home
+                    and item~=Enum.KeyCode.End and item~=Enum.KeyCode.Escape then
+                    return item.Name
+                end
+            end
+            return nil
+        end
+        local function setSetting(key,raw)
+            local spec=controlSchema[key]
+            if not spec then return false,"Unknown setting: "..tostring(key) end
+            local value
+            local input=tostring(raw or ""):gsub("^%s+",""):gsub("%s+$","")
+            input=input:gsub('^"(.*)"$',"%1")
+            if spec[1]=="bool" then
+                value=parseBool(input:lower())
+                if value==nil then return false,"Use on/off for "..key end
+            elseif spec[1]=="num" then
+                local n=tonumber(input)
+                if not n or n~=n or n==math.huge or n==-math.huge then
+                    return false,"Expected a number for "..key
+                end
+                -- Use the identical bounds and steps as the menu sliders.
+                if n<spec[3] or n>spec[4] then
+                    return false,string.format("%s must be between %d and %d",
+                        key,spec[3],spec[4])
+                end
+                value=spec[3]+math.floor((n-spec[3])/spec[5]+0.5)*spec[5]
+                value=math.clamp(value,spec[3],spec[4])
+            elseif spec[1]=="enum" then
+                for _,option in ipairs(spec[3]) do
+                    if option:lower()==input:lower() then value=option;break end
+                end
+                if not value then
+                    return false,"Allowed "..key..": "..table.concat(spec[3],", ")
+                end
+            elseif spec[1]=="key" then
+                value=parseKey(input)
+                if not value then
+                    return false,"Invalid Aim Key (try Always, Right Mouse, LeftAlt or X)"
+                end
+            end
+            if key=="aimKey" then
+                applyAimKey(value)
+            else
+                state[key]=value
+                if key=="enabled" then
+                    if not value then
+                        for _,w in pairs(widgets) do hideWidget(w) end
+                    else
+                        scanAccumulator=10
+                        scanDirty=true
+                    end
+                end
+                if key=="aimEnabled" and not value then
+                    aimSelected=nil
+                    disableAimCorrection()
+                end
+            end
+            refreshAllToggles()
+            return true,key.." = "..tostring(value)
+        end
+        local function listSettings()
+            log("INFO","-- MENU SETTINGS (get KEY / set KEY VALUE / toggle KEY) --")
+            for _,key in ipairs(keys) do
+                local spec=controlSchema[key]
+                local suffix=spec[1]=="num"
+                    and string.format(" [%s..%s step %s]",spec[3],spec[4],spec[5])
+                    or spec[1]=="enum" and (" ["..table.concat(spec[3],"/").."]")
+                    or ""
+                log("INFO",key.." = "..tostring(state[key])..suffix)
+            end
+        end
+        local tabMap={aimbot="Aimbot",esp="ESP",modifiers="Modifiers",
+            compat="Compat",settings="Settings",debug="Debug"}
+        local function run(input,verb,tail)
+            if verb=="settings" then
+                listSettings()
+                return true
+            elseif verb=="get" then
+                local key=canonical(tail)
+                if not key then log("WARN","Unknown menu setting. Use settings.");return true end
+                log("INFO",key.." = "..tostring(state[key]))
+                return true
+            elseif verb=="set" then
+                local target,value=tail:match("^(%S+)%s+(.+)$")
+                local key=canonical(target)
+                if not key or not value then
+                    log("WARN","Usage: set <setting> <value>  (settings lists all keys)")
+                    return true
+                end
+                local ok,message=setSetting(key,value)
+                log(ok and "INFO" or "WARN",message)
+                return true
+            elseif verb=="toggle" then
+                local key=canonical(tail)
+                if not key or controlSchema[key][1]~="bool" then
+                    log("WARN","Usage: toggle <boolean setting> (see settings)")
+                    return true
+                end
+                local ok,message=setSetting(key,tostring(not state[key]))
+                log(ok and "INFO" or "WARN",message)
+                return true
+            elseif verb=="resetsettings" then
+                for _,key in ipairs(keys) do
+                    local default=defaults[key]
+                    if key=="aimKey" then applyAimKey(default)
+                    else state[key]=default end
+                end
+                aimSelected=nil
+                disableAimCorrection()
+                scanDirty=true
+                scanAccumulator=10
+                refreshAllToggles()
+                log("INFO","All menu options restored to startup defaults")
+                return true
+            elseif verb=="tab" then
+                local page=tabMap[tail:lower()]
+                if not page then
+                    log("WARN","Tabs: Aimbot, ESP, Modifiers, Compat, Settings, Debug")
+                    return true
+                end
+                window.Visible=true
+                selectTab(page)
+                clampWindow(false)
+                log("INFO","Opened "..page.." tab")
+                return true
+            end
+            return false
+        end
+        return {run=run, listSettings=listSettings}
+    end)()
+
+    local commandHistory={}
+    local commandHistoryCursor=0
     local function runCommand(raw)
-        local input=(raw or ""):lower():gsub("^%s+",""):gsub("%s+$","")
-        if input=="help" then log("INFO","Commands: help, status, compat, compatmove, compatclear, copycompat, inputdiag, modstatus, modprobe, aimbot on/off, aimstatus, probe, sources, team, calibrate, clearteam, targets, recenter, esp on/off, clear, unload")
-        elseif input=="status" then log("INFO","Aimbot="..tostring(state.aimEnabled).." | "..aimStatus.." | method="..state.aimMethod.." | backend="..aimBackend)
-            log("INFO","ESP="..tostring(state.enabled).." visible="..stats.rendered.." targets="..#targets.." verified="..stats.matched.." enemyGroups="..stats.enemyGroups.." unidentified="..stats.anonymous.." unknownTeams="..stats.unknownTeams.." excluded="..stats.teammates.." fps="..math.floor(stats.fps).." connections="..#connections)
-        elseif input=="compat" then
-            safeCall("Compatibility snapshot",function()
-                Compat.emit()
-                log("INFO","Read-only compatibility report printed to Roblox logs")
-            end)
-        elseif input=="compatmove" then
-            safeCall("Read-only input and motion observation",Compat.startObservation)
-        elseif input=="compatclear" then
+        local input=(raw or ""):gsub("^%s+",""):gsub("%s+$","")
+        if input=="" then return end
+        if #input>220 then log("WARN","Command exceeds 220 characters");return end
+        if commandHistory[#commandHistory]~=input then
+            commandHistory[#commandHistory+1]=input
+            if #commandHistory>40 then table.remove(commandHistory,1) end
+        end
+        commandHistoryCursor=#commandHistory+1
+        log("INFO","> "..input)
+        local verb,tail=input:match("^(%S+)%s*(.-)%s*$")
+        verb=(verb or ""):lower()
+        if consoleController.run(input,verb,tail) then return end
+        if verb=="help" then
+            log("INFO","-- CONSOLE COMMAND CENTER / v"..VERSION.." --")
+            log("INFO","settings | get KEY | set KEY VALUE | toggle KEY | resetsettings")
+            log("INFO","tab Aimbot/ESP/Modifiers/Compat/Settings/Debug")
+            log("INFO","status | aimstatus | probe | sources | targets | team")
+            log("INFO","calibrate | pick | clearteam | rescan")
+            log("INFO","compat | compatmove | compatclear | copycompat")
+            log("INFO","inputdiag | copyinput | resetinput | modprobe | modstatus")
+            log("INFO","copyreport | copylogs | find TEXT | history")
+            log("INFO","recenter | esp on/off | aimbot on/off | clear | unload")
+            log("INFO","Examples: set fov 200 ; toggle skeleton ; set aimMethod Auto")
+        elseif verb=="status" then
+            log("INFO","v"..VERSION.." | Aimbot="..tostring(state.aimEnabled)
+                .." | "..aimStatus.." | method="..state.aimMethod
+                .." | backend="..aimBackend)
+            log("INFO","ESP="..tostring(state.enabled).." | shown="..stats.rendered
+                .." | targets="..#targets.." | enemies="..stats.matched
+                .." | unknown="..(stats.anonymous+stats.unknownTeams)
+                .." | allies excluded="..stats.teammates
+                .." | FPS="..math.floor(stats.fps))
+        elseif verb=="compat" then
+            Compat.emit()
+            log("INFO","Compatibility report printed to Roblox logs")
+        elseif verb=="compatmove" then Compat.startObservation()
+        elseif verb=="compatclear" then
             Movement.restore()
             Movement.data.model=nil;Movement.data.root=nil;Movement.data.humanoid=nil
             SelfCalibration.clear("Cleared by user")
-        elseif input=="copycompat" then
-            safeCall("Copy compatibility",Compat.copy)
-        elseif input=="inputdiag" then
+            log("INFO","Session character calibration cleared")
+        elseif verb=="copycompat" then Compat.copy()
+        elseif verb=="inputdiag" then
             for _,entry in ipairs(getInputDiagnosticsLines()) do log("INFO",entry) end
-        elseif input=="copyinput" then copyInputDiagnostics()
-        elseif input=="resetinput" then resetInputDiagnostics();log("INFO","Camera & input counters reset")
-        elseif input=="modstatus" then
+        elseif verb=="copyinput" then copyInputDiagnostics()
+        elseif verb=="resetinput" then
+            resetInputDiagnostics()
+            log("INFO","Camera and input counters reset")
+        elseif verb=="modstatus" then
             for entry in Movement.report():gmatch("[^\n]+") do log("INFO",entry) end
-        elseif input=="modprobe" then
+        elseif verb=="modprobe" then
             log("INFO",Movement.probe())
             log("INFO",Movement.data.status)
-        elseif input=="probe" then discoverTargets();log("INFO",lastSource.." / "..lastScanDetails)
-        elseif input=="sources" then
-            local sourceLines=inspectDataSources()
-            for _, entry in ipairs(sourceLines) do log("INFO",entry) end
-        elseif input=="team" then
-            log("INFO","Calibration: "..calibrationMessage.." | events="..groupEvents)
-        elseif input=="calibrate" then calibrateEnemyFromCrosshair()
-        elseif input=="pick" then beginPicker()
-        elseif input=="clearteam" then clearCalibration();discoverTargets();log("INFO","Calibration cleared")
-        elseif input=="recenter" then clampWindow(true);log("INFO","Window centered")
-        elseif input=="targets" then
-            log("INFO","Candidates: "..#targets.."  verified="..stats.matched.." unverified="..stats.anonymous)
-            for i=1,math.min(12,#targets) do
+        elseif verb=="probe" or verb=="rescan" then
+            fallbackNextScan=0
+            discoverTargets()
+            log("INFO","ESP scan: "..lastSource.." / "..lastScanDetails)
+        elseif verb=="sources" then
+            for _,entry in ipairs(inspectDataSources()) do log("INFO",entry) end
+        elseif verb=="team" then
+            log("INFO","Team calibration: "..calibrationMessage
+                .." | mode="..calibrationMode.." | events="..groupEvents)
+        elseif verb=="calibrate" then calibrateEnemyFromCrosshair()
+        elseif verb=="pick" then beginPicker()
+        elseif verb=="clearteam" then
+            clearCalibration()
+            discoverTargets()
+            log("INFO","Manual team calibration cleared")
+        elseif verb=="recenter" then
+            clampWindow(true)
+            log("INFO","Window recentered")
+        elseif verb=="targets" then
+            log("INFO","Enemy targets="..#targets.." | player-owned="..stats.matched)
+            for i=1,math.min(15,#targets) do
                 local t=targets[i]
-                log("INFO",string.format("%d) %s [%s, %s]",i,t.player and t.player.Name or "calibrated enemy rig",t.source,t.player and "verified" or "group-only"))
+                log("INFO",string.format("%d) %s [%s]",i,
+                    t.player and t.player.Name or "unidentified rig",t.source))
             end
-        elseif input=="aimbot on" then state.aimEnabled=true;refreshAllToggles();log("INFO","Aimbot enabled; activation: "..state.aimKey)
-        elseif input=="aimbot off" then state.aimEnabled=false;refreshAllToggles();log("INFO","Aimbot disabled")
-        elseif input=="aimstatus" then
-            log("INFO","Aim: "..aimStatus.." | gameplay="..aimLastGameplayStatus.." | backend="..aimBackend.." | candidates="..aimSelectionCount.." | updates="..aimUpdates.." | cameraMovements="..aimCameraMoved.."/"..aimMovementSamples.." | overrides="..aimOverrideSamples.." | corrections="..aimCorrectionCount)
+        elseif verb=="aimstatus" then
+            log("INFO","Aim: "..aimStatus.." | gameplay="..aimLastGameplayStatus
+                .." | backend="..aimBackend
+                .." | candidates="..aimSelectionCount
+                .." | updates="..aimUpdates.." | errors="..aimErrors)
             log("INFO",getAimGateDiagnostics().." | aimKey="..state.aimKey)
-        elseif input=="esp on" then state.enabled=true;refreshAllToggles();log("INFO","ESP enabled")
-        elseif input=="esp off" then state.enabled=false;refreshAllToggles();for _,w in pairs(widgets) do hideWidget(w) end;log("INFO","ESP disabled")
-        elseif input=="clear" then table.clear(logs);logBox.Text=""
-        elseif input=="unload" then shutdown()
-        else log("WARN","Unknown command: "..input) end
+        elseif input:lower()=="aimbot on" then
+            local ok,msg=consoleController.run(input,"set","aimEnabled on")
+            -- set command handles the value and refreshes controls.
+        elseif input:lower()=="aimbot off" then
+            consoleController.run(input,"set","aimEnabled off")
+        elseif input:lower()=="esp on" then
+            consoleController.run(input,"set","enabled on")
+        elseif input:lower()=="esp off" then
+            consoleController.run(input,"set","enabled off")
+        elseif verb=="copyreport" or verb=="report" then
+            exportReport()
+        elseif verb=="copylogs" then
+            local data=table.concat(logs,"\n")
+            if type(setclipboard)=="function" and pcall(setclipboard,data) then
+                log("INFO","Console logs copied")
+            else
+                print(data)
+                log("WARN","Clipboard unavailable; console logs printed")
+            end
+        elseif verb=="find" then
+            if tail=="" then
+                log("WARN","Usage: find <text>")
+                return
+            end
+            local matches={}
+            for _,entry in ipairs(logs) do
+                if entry:lower():find(tail:lower(),1,true) then
+                    matches[#matches+1]=entry
+                end
+            end
+            log("INFO","Found "..#matches.." matching log entries (showing up to 12)")
+            for i=math.max(1,#matches-11),#matches do
+                log("INFO",matches[i])
+            end
+        elseif verb=="history" then
+            for i=math.max(1,#commandHistory-12),#commandHistory do
+                log("INFO",i..": "..commandHistory[i])
+            end
+        elseif verb=="clear" then
+            table.clear(logs)
+            if logBox then logBox.Text="" end
+        elseif verb=="unload" then shutdown()
+        else
+            log("WARN","Unknown command: "..input.." (type help)")
+        end
     end
-    connect(run.MouseButton1Click,function() local raw=cmd.Text;cmd.Text="";runCommand(raw) end)
-    connect(cmd.FocusLost,function(enterPressed) if enterPressed then local raw=cmd.Text;cmd.Text="";runCommand(raw) end end)
+    local function submitCommand()
+        local raw=cmd.Text
+        cmd.Text=""
+        safeCall("Console command",function() runCommand(raw) end)
+    end
+    connect(run.MouseButton1Click,submitCommand)
+    connect(cmd.FocusLost,function(enterPressed)
+        if enterPressed then submitCommand() end
+    end)
+    connect(cmd.InputBegan,function(input)
+        if input.KeyCode==Enum.KeyCode.Up then
+            commandHistoryCursor=math.max(1,commandHistoryCursor-1)
+            cmd.Text=commandHistory[commandHistoryCursor] or cmd.Text
+            cmd.CursorPosition=#cmd.Text+1
+        elseif input.KeyCode==Enum.KeyCode.Down then
+            commandHistoryCursor=math.min(#commandHistory+1,commandHistoryCursor+1)
+            cmd.Text=commandHistory[commandHistoryCursor] or ""
+            cmd.CursorPosition=#cmd.Text+1
+        end
+    end)
+    groupLabel(debugPage,"CONSOLE QUICK REFERENCE")
+    row(debugPage,"Menu settings","settings · get aimFovRadius · set fov 200 · toggle skeleton")
+    row(debugPage,"Navigation","tab ESP · tab Aimbot · tab Settings · tab Debug")
+    row(debugPage,"Troubleshooting","probe · sources · compat · aimstatus · copyreport")
+    action(debugPage,"Print full command help",function() runCommand("help") end)
+    action(debugPage,"Show every menu setting",function() runCommand("settings") end)
 
     selectTab("ESP")
     clampWindow(true)
@@ -3839,7 +4162,7 @@ local function launchSpectraUI()
     if not aimBindOk then
         log("ERROR","Aimbot render binding unavailable: "..tostring(aimBindError))
     end
-    log("INFO","SPECTRA Phase 1 v1.25.0 loaded. Bounded public Workspace model discovery and detailed ESP diagnostics")
+    log("INFO","SPECTRA Phase 1 v1.26.0 loaded. Unified debug console, settings commands and ESP diagnostics")
     log("INFO","Strict ESP filter active: unknown and allied rigs are never shown. F6 can calibrate opponents.")
     watchPlayerFolder()
     safeCall("Initial compatibility snapshot",function()
