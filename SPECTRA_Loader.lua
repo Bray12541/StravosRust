@@ -1,9 +1,9 @@
--- SPECTRA loader / current baseline v1.27.0
+-- SPECTRA loader / current baseline v1.27.1
 -- Live branch is used when it passes the version and compilation checks.
 -- Recovery never runs an old build that can display unidentified teammates.
 local BRANCH_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/spectra-loader/SPECTRA.lua"
-local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/93fe5e86246c4370256b452e26c0b873e529b7aa/SPECTRA.lua"
-local MINIMUM_VERSION = "1.27.0"
+local PINNED_URL = "https://raw.githubusercontent.com/Bray12541/StravosRust/21fa452a3e7d1430e0e77b3e16295c3a35cb5cca/SPECTRA.lua"
+local MINIMUM_VERSION = "1.27.1"
 
 if type(loadstring) ~= "function" then
     warn("[SPECTRA Loader] Your execution environment does not provide loadstring")
